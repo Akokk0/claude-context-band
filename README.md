@@ -7,8 +7,6 @@
 
 <p align="center">
   Claude Code 的一个 mod:在输入框上方加一条带,<b>上下文天气</b>、<b>额度</b>和<b>进度</b>一眼看完。
-  <br>
-  装上就能用,不用往 <code>CLAUDE.md</code> 里添任何东西。
 </p>
 
 <p align="center">
