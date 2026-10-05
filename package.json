@@ -1,0 +1,16 @@
+{
+  "name": "claude-context-band",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "check": "vp check",
+    "typecheck": "tsc -p .",
+    "validate": "claude plugin validate .",
+    "test": "claude plugin test ."
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2",
+    "vite-plus": "^1.0.0"
+  },
+  "packageManager": "pnpm@12.9.1"
+}

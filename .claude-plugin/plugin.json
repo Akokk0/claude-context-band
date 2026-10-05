@@ -1,0 +1,10 @@
+{
+  "name": "context-band",
+  "version": "0.1.0",
+  "description": "A band above the prompt: context-window weather, usage limits, progress rows and subagent rows",
+  "author": {
+    "name": "Akokko"
+  },
+  "license": "MIT",
+  "types": "./types/index.d.ts"
+}

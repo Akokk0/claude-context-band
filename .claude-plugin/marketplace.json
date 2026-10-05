@@ -1,0 +1,15 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "akokko",
+  "description": "Context Band: a band above the Claude Code prompt for context, usage limits and progress",
+  "owner": { "name": "Akokko" },
+  "plugins": [
+    {
+      "name": "context-band",
+      "description": "A band above the prompt: context-window weather, usage limits, progress rows and subagent rows",
+      "author": { "name": "Akokko" },
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}
