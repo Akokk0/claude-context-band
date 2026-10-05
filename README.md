@@ -123,6 +123,7 @@ vp run test        # 跑测试
 
 - 测试用的是 Claude Code 自带的跑具(`claude plugin test`),不是 vitest:要用 `vp run test`,直接 `vp test` 跑不到它们。
 - 格式用 oxfmt 的默认写法,lint 用 oxlint 的默认规则,都没有配置文件。
+- `python3 scripts/logo.py` 重新生成 `docs/images/logo.svg`。
 - 类型检查要等 Claude Code 把这个 mod 加载过一次才跑得起来,见下面 `.claude-plugin/types/` 那一段。
 
 | 文件                   | 管什么                                |
