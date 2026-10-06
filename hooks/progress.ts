@@ -32,8 +32,16 @@ const MAX_PHASES = 8;
 const NAME_CHARS = 6;
 /** 一步窄于这么多像素就不画小刻度,免得糊成一片。 */
 const TICK_ROOM = 6;
-/** 胶囊右边到下一道刻度至少剩这么宽,小箭头才走得开。 */
-const WALK_ROOM = 24;
+/** 小箭头前后尽量隔这么远(主人看过:8 步的行 54 宽里四只,这个密度正好),只数取最接近的整数。 */
+const WALK_GAP = 13.5;
+/** 但绝不比这更密:再近就嫌挤(隔 6 的、三只挤成一团的,主人都看过;13 步的行一格 33 宽,三只隔 11 和两只比过,主人要两只)。连一只都放不下的格子不画箭头。 */
+const WALK_TIGHT = 12;
+/** 小箭头每秒走这么远,格子宽窄都是这个速度:一趟的时间定死的话,宽格子里快、窄格子里慢(主人看过)。 */
+const WALK_SPEED = 24;
+/** 小箭头从胶囊底下钻出来:起步的地方比它停着的位置靠左这么多。 */
+const WALK_IN = 8;
+/** 小箭头在路的两头各用这么长淡入淡出;路短的话最多各占一趟的两成。 */
+const WALK_FADE = 7;
 export const ROW_HEIGHT = 28;
 
 const ROW_WIDTH = 680;
@@ -489,6 +497,8 @@ function pillWidth(label: string): number {
 }
 
 const headOf = (done: number, total: number) => Math.round((TRACK_W * done) / total);
+/** 写进样式表的数:最多三位小数,零点几不带打头的 0。 */
+const short = (value: number) => String(Number(value.toFixed(3))).replace(/^0\./, ".");
 
 /** 条和胶囊滑过去、正在做的那一格跟着淡进来,一共这么久(毫秒)。 */
 const SLIDE_MS = 500;
@@ -540,32 +550,39 @@ export function rowSvg(
   const next = headOf(Math.min(row.done + 1, total), total);
   const pillEnd = pillAt(head) + pillW;
   const start = pillEnd - TRACK_H / 2;
-  // 底上是三只小箭头,从胶囊走向下一道刻度:胶囊写的是正在做的阶段,人却趴在做完的那一段上,
+  // 底上是几只小箭头,从胶囊走向下一道刻度:胶囊写的是正在做的阶段,人却趴在做完的那一段上,
   // 箭头说的是「从这儿干到那儿」(主人定的;把胶囊挪进这一格的话,上色的长度就不等于做完的了)。
-  // 回合停了它们不走,叠成胶囊右边的一只。胶囊右边剩得太少、箭头走不开时,照旧铺流动的斜纹。
+  // 回合停了它们不走,叠成胶囊右边的一只。胶囊右边剩得太少、一只都放不下时,照旧铺流动的斜纹。
+  // 它们从胶囊底下钻出来,一直走到下一道刻度:整格都是路,几只把一趟平分着错开,前后正好隔一格宽除以只数
+  // (只让它们在格子中间走的话,窄格子里两只都嫌挤,主人看过)。
   const room = next - pillEnd;
-  const walks = room >= WALK_ROOM;
+  const arrows = Math.min(Math.round(room / WALK_GAP), Math.floor(room / WALK_TIGHT));
+  const walks = arrows > 0;
   const arrowX = TRACK_X + pillEnd + 5;
   const arrowY = TRACK_Y + TRACK_H / 2 - 4;
   const doing =
     underWay && next > start
       ? `<g class="pr-doing" clip-path="url(#pr-next)"><rect x="${TRACK_X + start}" y="${TRACK_Y}" width="${next - start}" height="${TRACK_H}" fill="url(#pr-ink)" fill-opacity="0.3"/>` +
         (walks
-          ? `<g fill="none" stroke="${look.pill}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${[
-              "",
-              " d1",
-              " d2",
-            ]
-              .map((delay) => `<path class="pr-walk${delay}" d="M${arrowX},${arrowY} l4,4 l-4,4"/>`)
-              .join("")}</g>`
+          ? `<g fill="none" stroke="${look.pill}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${Array.from(
+              { length: arrows },
+              (_, k) =>
+                `<path class="pr-walk${k ? ` d${k}` : ""}" d="M${arrowX},${arrowY} l4,4 l-4,4"/>`,
+            ).join("")}</g>`
           : `<rect class="pr-stripes" x="${TRACK_X + start - 16}" y="${TRACK_Y}" width="${next - start + 16}" height="${TRACK_H}" fill="url(#pr-hatch)"/>`) +
         "</g>"
       : "";
+  // 速度和密度不随格子变:路长一趟就久、排的只数就多,两头淡入淡出的长度也不跟着变长。
+  const lap = room / WALK_SPEED;
+  const fade = Math.min(20, (WALK_FADE / room) * 100);
   const walk = walks
-    ? `@keyframes pr-walk{0%{transform:translateX(0);opacity:0}20%{opacity:1}80%{opacity:1}100%{transform:translateX(${room - 12}px);opacity:0}}` +
-      ".is-working .pr-walk{animation:pr-walk 1.5s linear var(--at) infinite}" +
-      ".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}" +
-      ".is-working .pr-walk.d2{animation-delay:calc(var(--at) + 1s)}"
+    ? `@keyframes pr-walk{0%{transform:translateX(${-WALK_IN}px);opacity:0}${short(fade)}%{opacity:1}${short(100 - fade)}%{opacity:1}100%{transform:translateX(${room - WALK_IN}px);opacity:0}}` +
+      `.is-working .pr-walk{animation:pr-walk ${short(lap)}s linear var(--at) infinite}` +
+      Array.from(
+        { length: arrows - 1 },
+        (_, k) =>
+          `.is-working .pr-walk.d${k + 1}{animation-delay:calc(var(--at) + ${short(((k + 1) * lap) / arrows)}s)}`,
+      ).join("")
     : "";
 
   const motion = moved

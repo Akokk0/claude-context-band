@@ -1340,18 +1340,20 @@ test("small arrows walk from the pill to the next tick: the name on the pill is 
   await report($, { done: 4 });
 
   // 胶囊写的是正在做的阶段,人却趴在做完的那一段上(主人指出来的):箭头从它走向下一道刻度,说的是「从这儿干到那儿」。
-  // 胶囊右端在 380,箭头从它右边 5 起;这一格还剩 48,箭头自己宽 4、两头各留一点,一共走 36。
+  // 胶囊右端在 380,这一格还剩 48。箭头从胶囊底下钻出来(比停着的位置靠左 8),一直走到下一道刻度,正好走 48:
+  // 整格都是它的路,前后尽量隔 13.5,这里四只(隔 12)。每秒走 24,所以这一趟是 2 秒;两头各用 7 淡入淡出。
   const { source } = (await drawingsOn($))[1];
   expect([
     ...source.matchAll(/<path class="pr-walk[^"]*" d="M385,10 l4,4 l-4,4"\/>/g),
-  ]).toHaveLength(3);
-  expect(source).toContain("100%{transform:translateX(36px);opacity:0}");
-  // 三只错开走;回合停了就不走,叠成胶囊右边的一只,停着也指着方向。
+  ]).toHaveLength(4);
   expect(source).toContain(
-    ".is-working .pr-walk{animation:pr-walk 1.5s linear var(--at) infinite}",
+    "@keyframes pr-walk{0%{transform:translateX(-8px);opacity:0}14.583%{opacity:1}85.417%{opacity:1}100%{transform:translateX(40px);opacity:0}}",
   );
+  // 四只把一趟平分着错开走,前后差半秒;回合停了就不走,叠成胶囊右边的一只,停着也指着方向。
+  expect(source).toContain(".is-working .pr-walk{animation:pr-walk 2s linear var(--at) infinite}");
   expect(source).toContain(".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}");
   expect(source).toContain(".is-working .pr-walk.d2{animation-delay:calc(var(--at) + 1s)}");
+  expect(source).toContain(".is-working .pr-walk.d3{animation-delay:calc(var(--at) + 1.5s)}");
   // 有箭头的这一格不再铺流动的斜纹:斜纹只剩填充上那一层。
   expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(1);
 });
@@ -1412,10 +1414,175 @@ test("several phases of one step each: the arrows run through the phase the pill
     done: 1,
   });
 
-  // 一期 62 宽:做完 1 期,头在 62,胶囊「2期」右端贴着它;箭头从 255 走到第 2 期的右沿之前。
+  // 一期 62 宽:做完 1 期,头在 62,胶囊「2期」右端贴着它;箭头停在 255,走起来一直走到第 2 期的右沿。
   const { source } = (await drawingsOn($))[1];
   expect(source).toContain('d="M255,10 l4,4 l-4,4"');
-  expect(source).toContain("100%{transform:translateX(49px);opacity:0}");
+  expect(source).toContain("100%{transform:translateX(53px);opacity:0}");
+});
+
+test("a wide step is walked at the same pace and as densely as a narrow one: it just holds more arrows", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "big",
+    title: "大改造",
+    phases: ["1期", "2期", "3期"].map((name) => ({ name, steps: 1 })),
+    done: 1,
+  });
+
+  // 一期 144 宽:前后尽量隔 13.5(主人说 8 步那行 54 宽里四只的密度正好),最接近的是十一只;
+  // 每秒走 24(12 步那行的速度),一趟 6 秒。
+  // (一趟的时间定死、只数封顶的话,宽格子里又快又稀,窄格子里又慢,主人看过。)
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M337,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(11);
+  expect(source).toContain(".is-working .pr-walk{animation:pr-walk 6s linear var(--at) infinite}");
+  expect(source).toContain(".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .545s)}");
+  expect(source).toContain(".is-working .pr-walk.d10{animation-delay:calc(var(--at) + 5.455s)}");
+  // 淡入淡出的长度不跟着格子变长:还是两头各 7。
+  expect(source).toContain("4.861%{opacity:1}95.139%{opacity:1}");
+});
+
+test("a narrow step gets two arrows, a whole 12 apart: with only half the cell to walk they sat 6 apart and looked crammed", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "slices",
+    title: "第 2 期",
+    phases: [{ name: "切片", steps: 18 }],
+    done: 14,
+  });
+
+  // 一步 24 宽(主人截图里那一行):三只挤成一团,只走半格的两只也嫌挤(都是主人看过的)。整格都走,放得下两只。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M529,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(2);
+  expect(source).toContain("100%{transform:translateX(16px);opacity:0}");
+  expect(source).toContain(".is-working .pr-walk{animation:pr-walk 1s linear var(--at) infinite}");
+  expect(source).toContain(".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}");
+  expect(source).not.toContain(".pr-walk.d2");
+});
+
+test("a middling step gets three arrows", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "slices",
+    title: "第 2 期",
+    phases: [{ name: "切片", steps: 12 }],
+    done: 6,
+  });
+
+  // 一步 36 宽:三只,前后隔 12,一趟 1.5 秒。主人说这一种的密度和速度正好,别的宽度都照它来。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M409,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(3);
+  expect(source).toContain("100%{transform:translateX(28px);opacity:0}");
+  expect(source).toContain(
+    ".is-working .pr-walk{animation:pr-walk 1.5s linear var(--at) infinite}",
+  );
+  expect(source).toContain("19.444%{opacity:1}80.556%{opacity:1}");
+  expect(source).toContain(".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}");
+  expect(source).toContain(".is-working .pr-walk.d2{animation-delay:calc(var(--at) + 1s)}");
+  expect(source).not.toContain(".pr-walk.d3");
+});
+
+test("a step of 33 gets two arrows, not three 11 apart", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "promo",
+    title: "宣传视频",
+    phases: [
+      { name: "分镜", steps: 1 },
+      { name: "搭建", steps: 2 },
+      { name: "配色", steps: 1 },
+      { name: "声音", steps: 8 },
+      { name: "成片", steps: 1 },
+    ],
+    done: 12,
+  });
+
+  // 一共 13 步,一步 33 宽(主人带上那一行):两只隔 16.5,三只隔 11。两种主人都在带上看过,说两只的最合适。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M592,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(2);
+  expect(source).toContain("100%{transform:translateX(25px);opacity:0}");
+  expect(source).toContain(
+    ".is-working .pr-walk{animation:pr-walk 1.375s linear var(--at) infinite}",
+  );
+});
+
+test("a wide step gets six arrows a little over 14 apart, not seven", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "slices",
+    title: "大格 5 步",
+    phases: [{ name: "切片", steps: 5 }],
+    done: 2,
+  });
+
+  // 一步 86 宽:按隔 13.5 算最接近的是六只(隔 14.3),不是七只(主人看过这一行,说标准)。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M366,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(6);
+});
+
+test("arrows never sit closer than 12: a step that would hold two only by squeezing them gets one", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "slices",
+    title: "第 2 期",
+    phases: [{ name: "切片", steps: 20 }],
+    done: 10,
+  });
+
+  // 一步 22 宽:按隔 13.5 算最接近的是两只,可那样前后只隔 11。不比 12 更密,所以一只(主人说的:二十步往上才一只)。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M409,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(1);
+  expect(source).not.toContain(".pr-walk.d1");
+});
+
+test("a tiny step gets a single arrow", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "slices",
+    title: "第 2 期",
+    phases: [{ name: "切片", steps: 24 }],
+    done: 12,
+  });
+
+  // 一步 18 宽(二十步往上的行):只放得下一只。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M409,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(1);
+  expect(source).toContain("100%{transform:translateX(10px);opacity:0}");
+  // 路短,一趟就短:.75 秒;淡入淡出最多各占一趟的两成。
+  expect(source).toContain(
+    ".is-working .pr-walk{animation:pr-walk .75s linear var(--at) infinite}",
+  );
+  expect(source).toContain("20%{opacity:1}80%{opacity:1}");
+  expect(source).not.toContain(".pr-walk.d1");
+});
+
+test("a step with no room for even one arrow keeps the flowing stripes", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "many",
+    title: "很多步",
+    phases: [{ name: "切片", steps: 40 }],
+    done: 20,
+  });
+
+  // 一步 11 宽,不到 12:箭头走不开,这一格照旧铺流动的斜纹(填充上一层,这一格一层)。
+  const { source } = (await drawingsOn($))[1];
+  expect(source).toContain('class="pr-doing"');
+  expect(source).not.toContain('class="pr-walk');
+  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(2);
 });
 
 test("at the very start the pill is pushed against the left end: the marked step begins where the pill ends, not where the bar does", async ($, on) => {
@@ -1432,9 +1599,9 @@ test("at the very start the pill is pushed against the left end: the marked step
   expect(source).toContain(
     '<clipPath id="pr-next"><rect x="217" y="5" width="25" height="18"/></clipPath>',
   );
-  // 胶囊右边只剩 16,箭头走不开:这一格照旧铺流动的斜纹。
-  expect(source).not.toContain('class="pr-walk');
-  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(2);
+  // 胶囊右边只剩 16:放得下一只箭头。
+  expect([...source.matchAll(/class="pr-walk/g)]).toHaveLength(1);
+  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(1);
 });
 
 test("a step narrower than the pill sitting on it has no room to be marked", async ($, on) => {
