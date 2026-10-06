@@ -899,7 +899,12 @@ test("a reported piece of work is a row under the gauges, and the report is ackn
   expect(row.alt).toBe("切片 ⑳ · 图库合并:工作中,施工 1.1/3,33%");
   expect(row.height).toBe(28);
   expect(row.isInteractive).toBeUndefined();
-  for (const piece of [">切片 ⑳ · 图库合并<", ">施工 1.1/3<", ">33%<", 'viewBox="0 0 680 28"']) {
+  for (const piece of [
+    ">切片 ⑳ · 图库合并<",
+    '><tspan class="pr-now">施工</tspan><',
+    ">1.1/3<",
+    'viewBox="0 0 680 28"',
+  ]) {
     expect(row.source).toContain(piece);
   }
 });
@@ -1276,7 +1281,7 @@ test("two reports sent at once both land", async ($, on) => {
   ]);
 });
 
-test("the step being worked on is marked: a tinted, striped stretch from the head of the bar to the next tick", async ($, on) => {
+test("the step being worked on is marked: a tinted stretch from the head of the bar to the next tick", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { done: 4 });
 
@@ -1291,19 +1296,106 @@ test("the step being worked on is marked: a tinted, striped stretch from the hea
   expect(source.indexOf('class="pr-doing"')).toBeLessThan(source.indexOf('class="pr-pill"'));
 });
 
+test("small arrows walk from the pill to the next tick: the name on the pill is where the work is heading", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 4 });
+
+  // 胶囊写的是正在做的阶段,人却趴在做完的那一段上(主人指出来的):箭头从它走向下一道刻度,说的是「从这儿干到那儿」。
+  // 胶囊右端在 380,箭头从它右边 5 起;这一格还剩 48,箭头自己宽 4、两头各留一点,一共走 36。
+  const { source } = (await drawingsOn($))[1];
+  expect([
+    ...source.matchAll(/<path class="pr-walk[^"]*" d="M385,10 l4,4 l-4,4"\/>/g),
+  ]).toHaveLength(3);
+  expect(source).toContain("100%{transform:translateX(36px);opacity:0}");
+  // 三只错开走;回合停了就不走,叠成胶囊右边的一只,停着也指着方向。
+  expect(source).toContain(
+    ".is-working .pr-walk{animation:pr-walk 1.5s linear var(--at) infinite}",
+  );
+  expect(source).toContain(".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}");
+  expect(source).toContain(".is-working .pr-walk.d2{animation-delay:calc(var(--at) + 1s)}");
+  // 有箭头的这一格不再铺流动的斜纹:斜纹只剩填充上那一层。
+  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(1);
+});
+
+test("the pill names the phase under way and its name pulses; the count stands at the end of the row, where the percentage was", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "big",
+    title: "大改造",
+    phases: ["1期", "2期", "3期", "4期", "5期", "6期", "7期"].map((name) => ({ name, steps: 1 })),
+    done: 1,
+  });
+
+  // 原先胶囊写「2期 1/7」,人却趴在做完的第 1 期上(主人指出来的)。现在只写正在做的那一期,
+  // 字一明一暗说它还没做完,回合在跑才动;数字挪到行尾,百分比不要了(主人定的)。
+  const { source } = (await drawingsOn($))[1];
+  expect(source).toContain(
+    'font-weight="700" fill="#fff"><tspan class="pr-now">2期</tspan></text>',
+  );
+  expect(source).toContain(
+    'text-anchor="end" font-size="13" font-weight="700" fill="#18191C">1/7</text>',
+  );
+  expect(source).not.toContain("%</text>");
+  expect(source).toContain(
+    ".is-working .pr-now{animation:pr-now 1.4s ease-in-out var(--at) infinite alternate}",
+  );
+});
+
+test("a single phase reads the same way: its name on the pill, the steps at the end of the row", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "one", title: "一件活", phases: [{ name: "切片", steps: 18 }], done: 9 });
+
+  const { source } = (await drawingsOn($))[1];
+  expect(source).toContain('fill="#fff"><tspan class="pr-now">切片</tspan></text>');
+  expect(source).toContain('fill="#18191C">9/18</text>');
+});
+
+for (const [name, input, text] of [
+  ["waiting for a decision", { done: 6, status: "decide" }, "施工"],
+  ["all done", { done: 9 }, "完成"],
+] as const) {
+  test(`${name}, nothing is under way: no word on the pill blinks`, async ($, on) => {
+    await sessionAfter($, on, [36_400]);
+    await report($, input);
+
+    const { source } = (await drawingsOn($))[1];
+    expect(source).toContain(`>${text}</text>`);
+    expect(source).not.toContain('class="pr-now"');
+  });
+}
+
+test("several phases of one step each: the arrows run through the phase the pill names", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "big",
+    title: "大改造",
+    phases: ["1期", "2期", "3期", "4期", "5期", "6期", "7期"].map((name) => ({ name, steps: 1 })),
+    done: 1,
+  });
+
+  // 一期 62 宽:做完 1 期,头在 62,胶囊「2期」右端贴着它;箭头从 255 走到第 2 期的右沿之前。
+  const { source } = (await drawingsOn($))[1];
+  expect(source).toContain('d="M255,10 l4,4 l-4,4"');
+  expect(source).toContain("100%{transform:translateX(49px);opacity:0}");
+});
+
 test("at the very start the pill is pushed against the left end: the marked step begins where the pill ends, not where the bar does", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, {
     plan: "mods",
     title: "桌面 mods",
-    phases: [{ name: "任务", steps: 5 }],
+    phases: [{ name: "任务", steps: 8 }],
     done: 0,
   });
 
-  // 一步 86 宽。胶囊「任务 0/5」64 宽,顶在最左:这一格从胶囊右端往里 9 起,到第一道刻度。
-  expect((await drawingsOn($))[1].source).toContain(
-    '<clipPath id="pr-next"><rect x="243" y="5" width="31" height="18"/></clipPath>',
+  // 一步 54 宽。胶囊「任务」38 宽,顶在最左:这一格从胶囊右端往里 9 起,到第一道刻度。
+  const { source } = (await drawingsOn($))[1];
+  expect(source).toContain(
+    '<clipPath id="pr-next"><rect x="217" y="5" width="25" height="18"/></clipPath>',
   );
+  // 胶囊右边只剩 16,箭头走不开:这一格照旧铺流动的斜纹。
+  expect(source).not.toContain('class="pr-walk');
+  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(2);
 });
 
 test("a step narrower than the pill sitting on it has no room to be marked", async ($, on) => {
@@ -1328,7 +1420,6 @@ test("the stripes never spill past what they mark", async ($, on) => {
   expect([
     ...source.matchAll(/<g clip-path="url\(#pr-done\)"><rect class="pr-stripes"/g),
   ]).toHaveLength(1);
-  expect([...source.matchAll(/class="pr-stripes"/g)]).toHaveLength(2);
   expect(source).toContain('<clipPath id="pr-done"><rect width="432" height="18"/></clipPath>');
 });
 

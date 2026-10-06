@@ -32,6 +32,8 @@ const MAX_PHASES = 8;
 const NAME_CHARS = 6;
 /** 一步窄于这么多像素就不画小刻度,免得糊成一片。 */
 const TICK_ROOM = 6;
+/** 胶囊右边到下一道刻度至少剩这么宽,小箭头才走得开。 */
+const WALK_ROOM = 24;
 export const ROW_HEIGHT = 28;
 
 const ROW_WIDTH = 680;
@@ -131,33 +133,45 @@ export function statusOf(row: Row): RowStatus {
 }
 
 /**
- * 胶囊上那几个字:整件活做完了多少,分母是整件活,不是眼下这个阶段(「2期 1/1」那样的没有意思,主人指出来的)。
+ * 行尾那个数:整件活做完了多少,分母是整件活,不是眼下这个阶段(「2期 1/1」那样的没有意思,主人指出来的)。
  * 数的是做完的,不是「正在做第几个」:后一种写法开工时就是 1/4,旁边的百分比却是 0%,看着像做完了一步
- * (原先就是那样写的,主人指出来的)。前面的名字是正在做的那个阶段。
- * - 只有一个阶段:做完几步 / 一共几步,「切片 9/18」。
- * - 好几个阶段、眼下这个只有一步:做完几个阶段 / 一共几个阶段,「2期 1/7」。
- * - 好几个阶段、眼下这个还分步:做完几个阶段.眼下这个阶段做完几步 / 一共几个阶段,「施工 1.2/3」。
+ * (原先就是那样写的,主人指出来的)。
+ * - 只有一个阶段:做完几步 / 一共几步,「9/18」。
+ * - 好几个阶段、眼下这个只有一步:做完几个阶段 / 一共几个阶段,「1/7」。
+ * - 好几个阶段、眼下这个还分步:做完几个阶段.眼下这个阶段做完几步 / 一共几个阶段,「1.2/3」。
  *   阶段那一位也数做完的:写成「第几个阶段」的话,最后一个阶段刚开始就是 3.0/3,看着像全做完了。
  * 带不带小数只看眼下这个阶段,不看别的阶段:原先只要有一个阶段分步就全都带,只有一步的阶段成了
  * 「首个提交 3.0/4」,那个 .0 什么也没说(主人指出来的)。
- * 做满了是「完成」加上面的分母。
+ * 做满了就是分母比分母。
  */
-function labelOf(row: Row): string {
+function countOf(row: Row): string {
   const current = currentOf(row);
   const phases = row.phases.length;
   if (phases === 1) {
     const steps = totalOf(row.phases);
-    return current
-      ? `${current.phase.name} ${current.stepsDone}/${steps}`
-      : `完成 ${steps}/${steps}`;
+    return `${current ? current.stepsDone : steps}/${steps}`;
   }
-  if (!current) return `完成 ${phases}/${phases}`;
+  if (!current) return `${phases}/${phases}`;
   const stepped = current.phase.steps > 1;
-  return `${current.phase.name} ${stepped ? `${current.phasesDone}.${current.stepsDone}` : current.phasesDone}/${phases}`;
+  return `${stepped ? `${current.phasesDone}.${current.stepsDone}` : current.phasesDone}/${phases}`;
+}
+
+/** 写成一句话的地方(回执、读屏、终端那一行)用的:正在做的阶段名加上面那个数;做满了是「完成」。 */
+function labelOf(row: Row): string {
+  return `${currentOf(row)?.phase.name ?? "完成"} ${countOf(row)}`;
 }
 
 function percentOf(row: Row): number {
   return Math.round((row.done / totalOf(row.phases)) * 100);
+}
+
+/**
+ * 胶囊上的字:正在做的那个阶段的名字,做满了是「完成」。数字在行尾。
+ * 胶囊的右端贴着进度头,刚跨进一个阶段时人还趴在上一段里(主人指出来的):名字一明一暗,说的是「这个还没做完」。
+ * 试过写成「1期 → 2期」,主人看了真带子之后不要。
+ */
+function pillOf(row: Row): string {
+  return currentOf(row)?.phase.name ?? "完成";
 }
 
 /**
@@ -487,8 +501,9 @@ export function rowSvg(
   const status = statusOf(row);
   const look = LOOKS[status];
   const total = totalOf(row.phases);
-  const label = labelOf(row);
-  const pillW = pillWidth(label);
+  const pill = pillOf(row);
+  const pillW = pillWidth(pill);
+  const underWay = status === "survey" || status === "working";
   const head = headOf(row.done, total);
   const from = headOf(Math.min(row.was, total), total);
   const pillAt = (x: number) => Math.min(Math.max(0, x - pillW), TRACK_W - pillW);
@@ -513,16 +528,39 @@ export function rowSvg(
     );
   }
 
-  // 正在做的这一步:从进度头到下一道刻度,铺一层淡的同色底加流动的斜纹。等拍板和做完了没有「正在做」。
+  // 正在做的这一步:从进度头到下一道刻度,铺一层淡的同色底。等拍板和做完了没有「正在做」。
   // 它从胶囊的右端往里半个圆角起(胶囊盖在上面,圆角外面就不露缺口),到下一道刻度止;
   // 胶囊被顶在轨道最左时,右端比进度头靠右,从胶囊算。这一步比胶囊还窄的话没地方画。
   const next = headOf(Math.min(row.done + 1, total), total);
-  const start = pillAt(head) + pillW - TRACK_H / 2;
+  const pillEnd = pillAt(head) + pillW;
+  const start = pillEnd - TRACK_H / 2;
+  // 底上是三只小箭头,从胶囊走向下一道刻度:胶囊写的是正在做的阶段,人却趴在做完的那一段上,
+  // 箭头说的是「从这儿干到那儿」(主人定的;把胶囊挪进这一格的话,上色的长度就不等于做完的了)。
+  // 回合停了它们不走,叠成胶囊右边的一只。胶囊右边剩得太少、箭头走不开时,照旧铺流动的斜纹。
+  const room = next - pillEnd;
+  const walks = room >= WALK_ROOM;
+  const arrowX = TRACK_X + pillEnd + 5;
+  const arrowY = TRACK_Y + TRACK_H / 2 - 4;
   const doing =
-    (status === "survey" || status === "working") && next > start
+    underWay && next > start
       ? `<g class="pr-doing" clip-path="url(#pr-next)"><rect x="${TRACK_X + start}" y="${TRACK_Y}" width="${next - start}" height="${TRACK_H}" fill="url(#pr-ink)" fill-opacity="0.3"/>` +
-        `<rect class="pr-stripes" x="${TRACK_X + start - 16}" y="${TRACK_Y}" width="${next - start + 16}" height="${TRACK_H}" fill="url(#pr-hatch)"/></g>`
+        (walks
+          ? `<g fill="none" stroke="${look.pill}" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">${[
+              "",
+              " d1",
+              " d2",
+            ]
+              .map((delay) => `<path class="pr-walk${delay}" d="M${arrowX},${arrowY} l4,4 l-4,4"/>`)
+              .join("")}</g>`
+          : `<rect class="pr-stripes" x="${TRACK_X + start - 16}" y="${TRACK_Y}" width="${next - start + 16}" height="${TRACK_H}" fill="url(#pr-hatch)"/>`) +
+        "</g>"
       : "";
+  const walk = walks
+    ? `@keyframes pr-walk{0%{transform:translateX(0);opacity:0}20%{opacity:1}80%{opacity:1}100%{transform:translateX(${room - 12}px);opacity:0}}` +
+      ".is-working .pr-walk{animation:pr-walk 1.5s linear var(--at) infinite}" +
+      ".is-working .pr-walk.d1{animation-delay:calc(var(--at) + .5s)}" +
+      ".is-working .pr-walk.d2{animation-delay:calc(var(--at) + 1s)}"
+    : "";
 
   const motion = moved
     ? `@keyframes pr-fill{from{transform:translateX(${from - TRACK_W}px)}to{transform:translateX(${head - TRACK_W}px)}}` +
@@ -552,6 +590,10 @@ export function rowSvg(
     ".pr-ring{animation:pr-ring 2.2s ease-in-out var(--at) infinite}",
     ".pr-ringmark{animation:pr-ringmark 2.2s ease-in-out var(--at) infinite}",
     ".is-working .pr-stripes{animation:pr-stripes .9s linear var(--at) infinite}",
+    walk,
+    // 正在做的那个阶段的字一明一暗:还没做完。只动透明度,幅度小、周期长,不是闪。
+    "@keyframes pr-now{from{fill-opacity:1}to{fill-opacity:.45}}",
+    ".is-working .pr-now{animation:pr-now 1.4s ease-in-out var(--at) infinite alternate}",
     ".k-decide .pr-stripes,.k-done .pr-stripes{display:none}",
     "@media (prefers-reduced-motion:reduce){.pr-row *{animation:none !important}}",
     "</style>",
@@ -574,9 +616,9 @@ export function rowSvg(
     doing,
     ticks.join(""),
     `<g transform="translate(${TRACK_X} ${TRACK_Y})"><g class="pr-pill"><rect width="${pillW}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${look.pill}"/>`,
-    `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${escape(label)}</text></g></g>`,
+    `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${underWay ? `<tspan class="pr-now">${escape(pill)}</tspan>` : escape(pill)}</text></g></g>`,
     "</g>",
-    `<text class="pr-ink" x="${ROW_WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${percentOf(row)}%</text>`,
+    `<text class="pr-ink" x="${ROW_WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${countOf(row)}</text>`,
     "</g></svg>",
   ].join("");
 }
