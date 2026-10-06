@@ -421,8 +421,10 @@ export const register: Register = (on) => {
     if (e.surface === "desktop") {
       const { Box, Svg } = $.ui.resolve(e);
       // 子代理的行在最上、进度行其次、仪表在最下面:行多了往上长,仪表的位置不动。每样各一张图。
-      // 带里任何一样变了,宿主会把这些图都重新摆一遍、动画从头播,所以相位都按最新的那个时刻算;
-      // 入场动画只给「最新的那次变化」本身,别的图只是被重新摆上去,不重播。
+      // 带里任何一样变了、带子被重画了(换会话再回来会连画两次),宿主都会把这些图重新摆一遍、动画从头播
+      // (真机上用探针量过:一张内容从不变的图,也跟着别的图一起从头播)。所以循环动画的相位按最新的那个
+      // 时刻算;入场动画按「画的这一刻离那张图自己上次变化过去了多久」算:播完了的不重播,播到一半的接着播。
+      const drawnAt = await $.clock.now();
       const latest = Math.max(
         shown?.at ?? 0,
         ...rows.map((row) => row.at),
@@ -446,7 +448,7 @@ export const register: Register = (on) => {
           ))}
           {rows.map((row) => (
             <Svg
-              source={rowSvg(row, { working: running, now: latest, fresh: row.at >= latest })}
+              source={rowSvg(row, { working: running, now: latest, since: drawnAt - row.at })}
               alt={rowAlt(row)}
               height={ROW_HEIGHT}
             />
@@ -458,7 +460,7 @@ export const register: Register = (on) => {
                 limits: quota,
                 limitsAt,
                 now: latest,
-                fresh: shown.at >= latest,
+                since: drawnAt - shown.at,
               })}
               alt={cardAlt(shown, history, quota)}
               height={CARD_HEIGHT}

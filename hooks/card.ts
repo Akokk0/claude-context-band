@@ -77,17 +77,24 @@ export function cardAlt(shown: Shown, history: readonly Turn[], limits: Limits):
   ].join(";");
 }
 
+/** 数字滚、柱子长、头像换,最长的那个播这么久(毫秒)。 */
+const ENTRANCE_MS = 260;
+
 /**
  * `now` 是带里最新的那个时刻(不一定是这个读数的):循环动画的相位按它算。
- * `fresh` 是「这个读数就是最新的那次变化」:是的话数字滚、柱子长;不是的话(后来别的东西变了,
- * 这张图只是被重新摆上去)什么入场动画都不带,免得每来一次别的更新就重播一遍。
+ * `since` 是画的这一刻离这个读数落下过去了多久(毫秒)。带里任何一样变了、带子被重画了,宿主都会把
+ * 所有图重新摆一遍、动画从头播(真机上用探针量过)。还没播完的入场动画,把已经过去的那一段记成负的延迟,
+ * 新摆上去的图接着播;早就播完的什么入场动画都不带,免得每重画一次就把数字再滚一遍
+ * (主人在真机上看到过:切到别的会话再切回来,什么都没变,百分比又滚了一遍)。
  */
 export function cardSvg(
   given: Shown,
   history: readonly Turn[],
-  options: { working: boolean; limits: Limits; limitsAt?: number; now: number; fresh: boolean },
+  options: { working: boolean; limits: Limits; limitsAt?: number; now: number; since: number },
 ): string {
-  const shown = options.fresh ? given : { ...given, was: given.now };
+  const since = Math.max(0, Math.round(options.since));
+  const fresh = since < ENTRANCE_MS;
+  const shown = fresh ? given : { ...given, was: given.now };
   const { now, was } = shown;
   const level = levelFor(now.percent);
   const changed = levelFor(was.percent).key !== level.key;
@@ -96,7 +103,7 @@ export function cardSvg(
 
   return [
     `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CARD_WIDTH} ${CARD_HEIGHT}" width="${CARD_WIDTH}" height="${CARD_HEIGHT}" role="img" font-family="${FONT}">`,
-    `<style>${styleOf(gauges, options.now)}${chart.style}</style>`,
+    `<style>${styleOf(gauges, options.now, fresh ? since : 0)}${chart.style}</style>`,
     defs(level, gauges),
     `<g class="cw-card${options.working ? " is-working" : ""}">`,
     avatar(level, changed),
@@ -331,7 +338,7 @@ function quota(gauge: Gauge, x: number, now: number): string {
 // 入场都用强的 ease-out、0.26 秒以内;循环的用 linear 或 ease-in-out。
 const EASE_OUT = "cubic-bezier(0.23,1,0.32,1)";
 
-function styleOf(gauges: readonly Gauge[], now: number): string {
+function styleOf(gauges: readonly Gauge[], now: number, since: number): string {
   const dark = [
     ".cw-ink{fill:#fff}",
     ".cw-sub{fill:#fff;fill-opacity:.68}",
@@ -348,8 +355,9 @@ function styleOf(gauges: readonly Gauge[], now: number): string {
     `@media (prefers-color-scheme:dark){${dark}}`,
     // 读数一落下,整张图就换一份新的,循环动画会从头来。让它们从「读数那一刻是这一小时里的第几毫秒」起步,
     // 换图前后相位就接得上:太阳不会每读一次数就跳回原位。
-    // 用的是读数的时刻,不是画的时刻:同一个读数不管重画几次都是同一张图,宿主没有东西可换。
-    `.cw-card{--at:-${now % 3_600_000}ms}`,
+    // 相位用的是读数的时刻,不是画的时刻:入场动画播完之后,同一个读数不管重画几次都是同一张图。
+    // `--since` 是入场动画已经播了多久(负的延迟),只在还没播完时不是 0。
+    `.cw-card{--at:-${now % 3_600_000}ms;--since:${-since}ms}`,
     MOTION,
   ].join("");
 }
@@ -379,14 +387,14 @@ const MOTION = [
   "@keyframes cw-fling{from{transform:translate(0,0)}to{transform:translate(5px,-4px)}}",
   "@keyframes cw-ripple{from{transform:scale(1);opacity:.45}to{transform:scale(1.45);opacity:0}}",
   "@keyframes cw-ghost{from{opacity:.25}to{opacity:.7}}",
-  `.cw-pop{animation:cw-pop .22s ${EASE_OUT} both}`,
-  `.cw-rise{animation:cw-rise .2s ${EASE_OUT} both}`,
+  `.cw-pop{animation:cw-pop .22s ${EASE_OUT} var(--since) both}`,
+  `.cw-rise{animation:cw-rise .2s ${EASE_OUT} var(--since) both}`,
   // 滚动的数:滑出去的那一行平时看不见,只在滑的那一下看得见(滑完已经在裁切框外面了)。
   ".cw-out{opacity:0}",
-  `.cw-roll-l .cw-out{animation:cw-out-l .26s ${EASE_OUT}}`,
-  `.cw-roll-l .cw-in{animation:cw-in-l .26s ${EASE_OUT} both}`,
-  `.cw-roll-s .cw-out{animation:cw-out-s .26s ${EASE_OUT}}`,
-  `.cw-roll-s .cw-in{animation:cw-in-s .26s ${EASE_OUT} both}`,
+  `.cw-roll-l .cw-out{animation:cw-out-l .26s ${EASE_OUT} var(--since)}`,
+  `.cw-roll-l .cw-in{animation:cw-in-l .26s ${EASE_OUT} var(--since) both}`,
+  `.cw-roll-s .cw-out{animation:cw-out-s .26s ${EASE_OUT} var(--since)}`,
+  `.cw-roll-s .cw-in{animation:cw-in-s .26s ${EASE_OUT} var(--since) both}`,
   ".is-working .cw-spin{animation:cw-spin 14s linear var(--at) infinite}",
   ".is-working .cw-breathe{animation:cw-breathe 1.8s ease-in-out var(--at) infinite alternate}",
   ".is-working .cw-drift{animation:cw-drift 7s linear var(--at) infinite}",
@@ -408,8 +416,8 @@ const MOTION = [
   `.is-working .cw-ring{animation:cw-ripple 1.8s ${EASE_OUT} var(--at) infinite}`,
   ".is-working .cw-ring2{animation-delay:calc(var(--at) + .9s)}",
   ".is-working .cw-ghost{animation:cw-ghost .9s ease-in-out var(--at) infinite alternate}",
-  `.cw-bar.cw-stretch{animation:cw-stretch .26s ${EASE_OUT} both}`,
-  `.is-working .cw-ghost.cw-stretch{animation:cw-ghost .9s ease-in-out var(--at) infinite alternate,cw-stretch .26s ${EASE_OUT} both}`,
+  `.cw-bar.cw-stretch{animation:cw-stretch .26s ${EASE_OUT} var(--since) both}`,
+  `.is-working .cw-ghost.cw-stretch{animation:cw-ghost .9s ease-in-out var(--at) infinite alternate,cw-stretch .26s ${EASE_OUT} var(--since) both}`,
   // 减少动态效果:位移和缩放都不要,入场只留淡入;滚动的数直接是新值。
   "@media (prefers-reduced-motion:reduce){.cw-card *{animation:none !important}.cw-card .cw-pop,.cw-card .cw-rise{animation:cw-fade .2s ease both !important}}",
 ].join("");

@@ -490,15 +490,21 @@ function pillWidth(label: string): number {
 
 const headOf = (done: number, total: number) => Math.round((TRACK_W * done) / total);
 
+/** 条和胶囊滑过去、正在做的那一格跟着淡进来,一共这么久(毫秒)。 */
+const SLIDE_MS = 500;
+
 /**
  * `now` 是带里最新的那个时刻:循环动画的相位按它算,图被重新摆上去时斜纹和齿轮才接得上。
- * `fresh` 是「这次报告就是最新的那次变化」:是的话条和胶囊滑过来;不是的话直接在位置上,不重播。
+ * `since` 是画的这一刻离这一行上次变化过去了多久(毫秒)。带里任何一样变了、带子被重画了,宿主都会把
+ * 所有图重新摆一遍、动画从头播(真机上用探针量过),所以入场的那一下滑动不能只看「它是不是最新变的」:
+ * 还在滑的,把已经过去的那一段记成负的延迟,新摆上去的图接着滑;早就滑完的,直接在位置上,不重播。
  */
 export function rowSvg(
   row: Row,
-  options: { working: boolean; now: number; fresh: boolean },
+  options: { working: boolean; now: number; since: number },
 ): string {
   const status = statusOf(row);
+  const since = Math.max(0, Math.round(options.since));
   const look = LOOKS[status];
   const total = totalOf(row.phases);
   const pill = pillOf(row);
@@ -507,7 +513,7 @@ export function rowSvg(
   const head = headOf(row.done, total);
   const from = headOf(Math.min(row.was, total), total);
   const pillAt = (x: number) => Math.min(Math.max(0, x - pillW), TRACK_W - pillW);
-  const moved = options.fresh && from !== head;
+  const moved = since < SLIDE_MS && from !== head;
   const title =
     [...row.title].length > TITLE_CHARS
       ? `${[...row.title].slice(0, TITLE_CHARS - 1).join("")}…`
@@ -563,11 +569,12 @@ export function rowSvg(
     : "";
 
   const motion = moved
-    ? `@keyframes pr-fill{from{transform:translateX(${from - TRACK_W}px)}to{transform:translateX(${head - TRACK_W}px)}}` +
+    ? `.pr-row{--since:${-since}ms}` +
+      `@keyframes pr-fill{from{transform:translateX(${from - TRACK_W}px)}to{transform:translateX(${head - TRACK_W}px)}}` +
       `@keyframes pr-pill{from{transform:translateX(${pillAt(from)}px)}to{transform:translateX(${pillAt(head)}px)}}` +
-      `.pr-fill{animation:pr-fill .45s ${EASE_IN_OUT} both}.pr-pill{animation:pr-pill .45s ${EASE_IN_OUT} both}` +
+      `.pr-fill{animation:pr-fill .45s ${EASE_IN_OUT} var(--since) both}.pr-pill{animation:pr-pill .45s ${EASE_IN_OUT} var(--since) both}` +
       // 正在做的那一格等胶囊快滑到了再淡进来:立刻出现的话,它悬在前面,和还在路上的胶囊之间隔着一段空轨道。
-      "@keyframes pr-doing{from{opacity:0}to{opacity:1}}.pr-doing{animation:pr-doing .2s ease-out .3s both}"
+      "@keyframes pr-doing{from{opacity:0}to{opacity:1}}.pr-doing{animation:pr-doing .2s ease-out calc(var(--since) + .3s) both}"
     : "";
 
   return [

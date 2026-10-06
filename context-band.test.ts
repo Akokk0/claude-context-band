@@ -516,9 +516,9 @@ test("while a response streams the card stays put: only the exact count at the e
   wire.silent = true;
   const reads = clock.reads;
   await step($);
-  expect(await sourceOn($)).toBe(before);
-  // 整个请求只在收完时读了一次用量,流的过程中一次都没读。
+  // 整个请求只在收完时读了一次用量,流的过程中一次都没读。(先数再画:画的时候也要读一次钟。)
   expect(clock.reads - reads).toBe(1);
+  expect(await sourceOn($)).toBe(before);
 
   wire.silent = false;
   wire.pieces = [];
@@ -658,9 +658,11 @@ test("a request that moved nothing leaves the very same picture: nothing is redr
   await begin($);
   use(60_000);
   await step($);
+  // 等数字滚完再比:滚的那一下只在读数刚落下时画。
+  clock.now += 1_000;
   const before = await sourceOn($, { isWorking: true });
 
-  // 又一次请求,窗口没动,只有时钟走了:图一个字都不变,宿主就没有东西可换。
+  // 又一次请求,窗口没动,只有时钟走了:图一个字都不变。
   clock.now += 4_000;
   await step($);
   expect(await sourceOn($, { isWorking: true })).toBe(before);
@@ -731,7 +733,7 @@ test("the ambient loops keep their phase across redraws: they start from the clo
 
   // 04:26:00 整,一小时里的第 1560 秒。
   const source = await sourceOn($, { isWorking: true });
-  expect(source).toContain(".cw-card{--at:-1560000ms}");
+  expect(source).toContain(".cw-card{--at:-1560000ms;--since:0ms}");
   expect(source).toContain(".is-working .cw-spin{animation:cw-spin 14s linear var(--at) infinite}");
 });
 
@@ -950,9 +952,12 @@ test("a report that moved the work slides the bar and the pill from where they s
     "@keyframes pr-fill{from{transform:translateX(-432px)}to{transform:translateX(-288px)}}",
   );
 
+  // 过了 5 秒早就滑完了:再画就是停在位置上的样子。同一份报告再来一次,图不变,也不再滑。
   clock.now += 5_000;
+  const settled = (await drawingsOn($))[1].source;
+  expect(settled).not.toContain("@keyframes pr-fill");
   await report($, { done: 3 });
-  expect((await drawingsOn($))[1].source).toBe(first);
+  expect((await drawingsOn($))[1].source).toBe(settled);
 
   await report($, { done: 6 });
   const moved = (await drawingsOn($))[1].source;
@@ -971,7 +976,9 @@ test("while the bar slides the marked step waits: it fades in as the pill lands,
   // 就孤零零悬在前面、和胶囊之间隔着一段空轨道(把片子一帧帧截下来才看见的)。等胶囊快到了它再淡进来。
   const moved = (await drawingsOn($))[1].source;
   expect(moved).toContain("@keyframes pr-doing{from{opacity:0}to{opacity:1}}");
-  expect(moved).toContain(".pr-doing{animation:pr-doing .2s ease-out .3s both}");
+  expect(moved).toContain(
+    ".pr-doing{animation:pr-doing .2s ease-out calc(var(--since) + .3s) both}",
+  );
 });
 
 test("reporting progress leaves the gauges exactly as they were", async ($, on) => {
@@ -1498,9 +1505,58 @@ test("a report that lands later restarts the gauges in step with the clock and w
   clock.now += 4_000;
   await report($, { done: 3 });
   const later = (await drawingsOn($))[0].source;
-  expect(later).toContain(".cw-card{--at:-1564000ms}");
+  expect(later).toContain(".cw-card{--at:-1564000ms;--since:0ms}");
   expect(later).not.toContain(' cw-out"');
   expect(later).not.toContain("@keyframes cw-stretch");
+});
+
+// ---- 探针(10-06)量出来的:带子被重画时,所有图都会被重新摆上去,动画从头播 ----
+
+test("a band drawn again long after the last change stands still: nothing rolls or slides a second time", async ($, on) => {
+  // 主人在真机上看到的:切到别的会话再切回来,带子被重画两次,窗口的百分比和上方那个数又滚了一遍,
+  // 而什么都没变。入场动画认的是「画的这一刻离那次变化过去了多久」,不是「它是不是最新变的那张」。
+  const use = await sessionAfter($, on, [36_400]);
+  await begin($);
+  use(60_000);
+  await step($);
+  await report($, { done: 3 });
+  const [gauge, row] = await drawingsOn($);
+  expect(gauge.source).toContain(' cw-out"');
+  expect(row.source).toContain("@keyframes pr-fill");
+
+  clock.now += 10_000;
+  const [gaugeAgain, rowAgain] = await drawingsOn($);
+  expect(gaugeAgain.source).not.toContain(' cw-out"');
+  expect(gaugeAgain.source).not.toContain("@keyframes cw-stretch");
+  expect(rowAgain.source).not.toContain("@keyframes pr-fill");
+  expect(rowAgain.source).not.toContain("@keyframes pr-doing");
+});
+
+test("a band drawn again in the middle of an entrance carries on from where it had got to", async ($, on) => {
+  // 一次变化常常连着画两回(回合结束时宿主撤「在跑」和我们写读数,先后不定)。第二回要是从头播,
+  // 滑到一半的胶囊就跳回起点。把已经过去的那一段记成负的延迟,新摆上去的图从那儿接着走。
+  const use = await sessionAfter($, on, [36_400]);
+  await begin($);
+  use(60_000);
+  await step($);
+  clock.now += 100;
+  const gauge = (await drawingsOn($))[0].source;
+  expect(gauge).toContain(' cw-out"');
+  expect(gauge).toContain("--since:-100ms}");
+  expect(gauge).toContain(
+    ".cw-roll-l .cw-in{animation:cw-in-l .26s cubic-bezier(0.23,1,0.32,1) var(--since) both}",
+  );
+
+  await report($, { done: 3 });
+  clock.now += 200;
+  const row = (await drawingsOn($))[1].source;
+  expect(row).toContain("@keyframes pr-fill");
+  expect(row).toContain(".pr-row{--since:-200ms}");
+  expect(row).toContain("var(--since) both}.pr-pill{");
+  // 正在做的那一格本来等 0.3 秒才淡进来,也跟着少等。
+  expect(row).toContain(".pr-doing{animation:pr-doing .2s ease-out calc(var(--since) + .3s) both}");
+  // 读数是 0.3 秒之前落下的,到这会儿数字已经滚完了。
+  expect((await drawingsOn($))[0].source).not.toContain(' cw-out"');
 });
 
 // ---- 审查(10-04)查出来的 ----
