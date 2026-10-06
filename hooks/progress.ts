@@ -565,7 +565,9 @@ export function rowSvg(
   const motion = moved
     ? `@keyframes pr-fill{from{transform:translateX(${from - TRACK_W}px)}to{transform:translateX(${head - TRACK_W}px)}}` +
       `@keyframes pr-pill{from{transform:translateX(${pillAt(from)}px)}to{transform:translateX(${pillAt(head)}px)}}` +
-      `.pr-fill{animation:pr-fill .45s ${EASE_IN_OUT} both}.pr-pill{animation:pr-pill .45s ${EASE_IN_OUT} both}`
+      `.pr-fill{animation:pr-fill .45s ${EASE_IN_OUT} both}.pr-pill{animation:pr-pill .45s ${EASE_IN_OUT} both}` +
+      // 正在做的那一格等胶囊快滑到了再淡进来:立刻出现的话,它悬在前面,和还在路上的胶囊之间隔着一段空轨道。
+      "@keyframes pr-doing{from{opacity:0}to{opacity:1}}.pr-doing{animation:pr-doing .2s ease-out .3s both}"
     : "";
 
   return [

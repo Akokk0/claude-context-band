@@ -962,6 +962,18 @@ test("a report that moved the work slides the bar and the pill from where they s
   expect(moved).toContain("@keyframes pr-pill{from{transform:translateX(");
 });
 
+test("while the bar slides the marked step waits: it fades in as the pill lands, not ahead of it", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await report($, { done: 4 });
+
+  // 进度头挪了,胶囊和填充要滑 0.45 秒才到。正在做的那一格(淡底和小箭头)要是立刻出现在新位置,
+  // 就孤零零悬在前面、和胶囊之间隔着一段空轨道(把片子一帧帧截下来才看见的)。等胶囊快到了它再淡进来。
+  const moved = (await drawingsOn($))[1].source;
+  expect(moved).toContain("@keyframes pr-doing{from{opacity:0}to{opacity:1}}");
+  expect(moved).toContain(".pr-doing{animation:pr-doing .2s ease-out .3s both}");
+});
+
 test("reporting progress leaves the gauges exactly as they were", async ($, on) => {
   await sessionAfter($, on, [36_400], LIMITS);
   const before = (await drawingsOn($))[0].source;
@@ -1463,6 +1475,7 @@ test("a reading that lands later restarts a row in step with the clock and witho
   const reported = (await drawingsOn($))[1].source;
   expect(reported).toContain(".pr-row{--at:-1560000ms}");
   expect(reported).toContain("@keyframes pr-fill");
+  expect(reported).toContain("@keyframes pr-doing");
 
   clock.now += 4_000;
   use(60_000);
@@ -1471,6 +1484,8 @@ test("a reading that lands later restarts a row in step with the clock and witho
   expect(later).toContain(".pr-row{--at:-1564000ms}");
   expect(later).not.toContain("@keyframes pr-fill");
   expect(later).not.toContain("@keyframes pr-pill");
+  // 没有滑动,正在做的那一格也不用等:直接在位置上。
+  expect(later).not.toContain("@keyframes pr-doing");
 });
 
 test("a report that lands later restarts the gauges in step with the clock and without rolling their numbers again", async ($, on) => {
