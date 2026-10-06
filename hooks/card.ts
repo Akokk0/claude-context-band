@@ -81,7 +81,7 @@ export function cardAlt(shown: Shown, history: readonly Turn[], limits: Limits):
 const ENTRANCE_MS = 260;
 
 /**
- * `now` 是带里最新的那个时刻(不一定是这个读数的):循环动画的相位按它算。
+ * `now` 是画的这一刻(不是读数落下的那一刻):循环动画的相位按它算。
  * `since` 是画的这一刻离这个读数落下过去了多久(毫秒)。带里任何一样变了、带子被重画了,宿主都会把
  * 所有图重新摆一遍、动画从头播(真机上用探针量过)。还没播完的入场动画,把已经过去的那一段记成负的延迟,
  * 新摆上去的图接着播;早就播完的什么入场动画都不带,免得每重画一次就把数字再滚一遍
@@ -353,9 +353,8 @@ function styleOf(gauges: readonly Gauge[], now: number, since: number): string {
     ":root{color-scheme:light dark}",
     "text{font-variant-numeric:tabular-nums}",
     `@media (prefers-color-scheme:dark){${dark}}`,
-    // 读数一落下,整张图就换一份新的,循环动画会从头来。让它们从「读数那一刻是这一小时里的第几毫秒」起步,
-    // 换图前后相位就接得上:太阳不会每读一次数就跳回原位。
-    // 相位用的是读数的时刻,不是画的时刻:入场动画播完之后,同一个读数不管重画几次都是同一张图。
+    // 带子每重画一次,整张图就换一份新的,循环动画会从头来。让它们从「画的这一刻是这一小时里的第几毫秒」起步,
+    // 换图前后相位就接得上:太阳不会每重画一次就跳回原位。
     // `--since` 是入场动画已经播了多久(负的延迟),只在还没播完时不是 0。
     `.cw-card{--at:-${now % 3_600_000}ms;--since:${-since}ms}`,
     MOTION,

@@ -653,7 +653,7 @@ test("a number that moved rolls: the old value slides out and the new one slides
   ]).toHaveLength(2);
 });
 
-test("a request that moved nothing leaves the very same picture: nothing is redrawn, whatever the clock says", async ($, on) => {
+test("a request that moved nothing leaves the picture as it is: only the loops move on with the clock", async ($, on) => {
   const use = await sessionAfter($, on, [36_400]);
   await begin($);
   use(60_000);
@@ -662,10 +662,12 @@ test("a request that moved nothing leaves the very same picture: nothing is redr
   clock.now += 1_000;
   const before = await sourceOn($, { isWorking: true });
 
-  // 又一次请求,窗口没动,只有时钟走了:图一个字都不变。
+  // 又一次请求,窗口没动,只有时钟走了:除了循环动画的相位跟着钟往前走,图一个字都不变。
   clock.now += 4_000;
   await step($);
-  expect(await sourceOn($, { isWorking: true })).toBe(before);
+  const after = await sourceOn($, { isWorking: true });
+  expect(unphased(after)).toBe(unphased(before));
+  expect(after).not.toBe(before);
 });
 
 test("the turn completing where its last request left it brings the numbers to rest", async ($, on) => {
@@ -735,6 +737,24 @@ test("the ambient loops keep their phase across redraws: they start from the clo
   const source = await sourceOn($, { isWorking: true });
   expect(source).toContain(".cw-card{--at:-1560000ms;--since:0ms}");
   expect(source).toContain(".is-working .cw-spin{animation:cw-spin 14s linear var(--at) infinite}");
+});
+
+test("a band drawn again with nothing new picks the loops up where they had got to: the phase follows the moment of drawing", async ($, on) => {
+  // 真机上记日志看到的:宿主推来一次额度读数,带子重画了,而窗口读数和进度行都没变。
+  // 相位要是按「最近一次变化的时刻」算,新摆上去的齿轮就从十秒前的角度转起,等于跳了一下。
+  const use = await sessionAfter($, on, [36_400]);
+  await begin($);
+  use(60_000);
+  await step($);
+  await report($, { done: 3 });
+  const [gauge, row] = await drawingsOn($);
+  expect(gauge.source).toContain(".cw-card{--at:-1560000ms;");
+  expect(row.source).toContain(".pr-row{--at:-1560000ms}");
+
+  clock.now += 10_000;
+  const [gaugeAgain, rowAgain] = await drawingsOn($);
+  expect(gaugeAgain.source).toContain(".cw-card{--at:-1570000ms;");
+  expect(rowAgain.source).toContain(".pr-row{--at:-1570000ms}");
 });
 
 test("a measurement that only moved the window leaves the quota gauges as they were", async ($, on) => {

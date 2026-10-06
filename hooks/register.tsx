@@ -421,15 +421,12 @@ export const register: Register = (on) => {
     if (e.surface === "desktop") {
       const { Box, Svg } = $.ui.resolve(e);
       // 子代理的行在最上、进度行其次、仪表在最下面:行多了往上长,仪表的位置不动。每样各一张图。
-      // 带里任何一样变了、带子被重画了(换会话再回来会连画两次),宿主都会把这些图重新摆一遍、动画从头播
-      // (真机上用探针量过:一张内容从不变的图,也跟着别的图一起从头播)。所以循环动画的相位按最新的那个
-      // 时刻算;入场动画按「画的这一刻离那张图自己上次变化过去了多久」算:播完了的不重播,播到一半的接着播。
+      // 带里任何一样变了、带子被重画了(换会话再回来会连画两次,宿主推来额度读数也会画一次),宿主都会把这些图
+      // 重新摆一遍、动画从头播(真机上用探针量过:一张内容从不变的图,也跟着别的图一起从头播)。
+      // 所以两样都按「画的这一刻」算:循环动画的相位从这一刻起步,新摆上去的图正好接着旧图转到的地方;
+      // 入场动画看这一刻离那张图自己上次变化过去了多久,播完了的不重播,播到一半的接着播。
+      // (相位原先按带里最近一次变化的时刻算,指望「没变就是同一张图,宿主没东西可换」;量出来它照换不误。)
       const drawnAt = await $.clock.now();
-      const latest = Math.max(
-        shown?.at ?? 0,
-        ...rows.map((row) => row.at),
-        ...agents.map((agent) => agent.at),
-      );
       // 当图片画,不画在沙箱框里(isInteractive):框每换一次内容要整个重载,重载那一瞬是空的,
       // 实时更新之后卡片每读一次数就闪一下。真机上用探针并排比过:图片换内容不闪。
       // 图的大小宿主不会从 SVG 里读(真机量过三回):
@@ -441,14 +438,14 @@ export const register: Register = (on) => {
         <Box flexDirection="column">
           {agents.map((agent) => (
             <Svg
-              source={agentSvg(agent, { now: latest })}
+              source={agentSvg(agent, { now: drawnAt })}
               alt={agentAlt(agent)}
               height={ROW_HEIGHT}
             />
           ))}
           {rows.map((row) => (
             <Svg
-              source={rowSvg(row, { working: running, now: latest, since: drawnAt - row.at })}
+              source={rowSvg(row, { working: running, now: drawnAt, since: drawnAt - row.at })}
               alt={rowAlt(row)}
               height={ROW_HEIGHT}
             />
@@ -459,7 +456,7 @@ export const register: Register = (on) => {
                 working: running,
                 limits: quota,
                 limitsAt,
-                now: latest,
+                now: drawnAt,
                 since: drawnAt - shown.at,
               })}
               alt={cardAlt(shown, history, quota)}
