@@ -289,10 +289,10 @@ test("the card is drawn as an image as wide as the band and as tall as the row, 
     // 当图片画,不画在沙箱框里:框每换一次内容要重载一次,整张卡片跟着闪(真机上撞过,探针对比过)。
     expect(card?.props.isInteractive).toBeUndefined();
     // 高度必须给:宿主不会从 SVG 里读,不给就是 150 高、内容缩在里面。
-    // 宽度不给:给了 680 的话它会贴在左边,右边空一截。
+    // 宽度不给:给了固定宽度的话它会贴在左边,右边空一截。
     expect(card?.props.width).toBeUndefined();
     expect(card?.props.height).toBe(56);
-    expect(String(card?.props.source)).toContain('viewBox="0 0 680 56" width="680" height="56"');
+    expect(String(card?.props.source)).toContain('viewBox="-8 0 696 56" width="696" height="56"');
   }
 });
 
@@ -730,6 +730,32 @@ test("a window almost full is a tornado", async ($, on) => {
   expect(source).not.toContain("lv-compact");
 });
 
+test("the tornado's ripple stays inside the image at its widest", async ($, on) => {
+  await sessionAfter($, on, [184_000]);
+
+  const source = String((await cardOn($, { isWorking: true }))?.props.source);
+  const [left, top, width, height] = (/viewBox="([^"]+)"/.exec(source)?.[1] ?? "")
+    .split(" ")
+    .map(Number);
+  // 头像的圆心,和从它那儿往外扩的那一圈。
+  const [x, y, r] = (
+    /<g transform="translate\((\d+) (\d+)\)"><circle class="cw-ring" r="(\d+)"/.exec(source) ?? []
+  )
+    .slice(1)
+    .map(Number);
+  const widest =
+    r! * Number(/@keyframes cw-ripple\{.*?to\{transform:scale\(([\d.]+)\)/.exec(source)?.[1]);
+  // 它得真的往外扩:缩成和头像一样大当然出不了界,可那就没有波纹了。
+  expect(widest).toBeGreaterThan(r! + 6);
+  // 图的边界会把出界的那一截切掉(原先左边被切掉 9 像素,上下各 1 像素):左、右、上、下都得留在图里。
+  expect([
+    x! - widest >= left!,
+    x! + widest <= left! + width!,
+    y! - widest >= top!,
+    y! + widest <= top! + height!,
+  ]).toEqual([true, true, true, true]);
+});
+
 test("the ambient loops keep their phase across redraws: they start from the clock, not from zero", async ($, on) => {
   await sessionAfter($, on, [36_400]);
 
@@ -925,7 +951,7 @@ test("a reported piece of work is a row under the gauges, and the report is ackn
     ">切片 ⑳ · 图库合并<",
     '><tspan class="pr-now">施工</tspan><',
     ">1.1/3<",
-    'viewBox="0 0 680 28"',
+    'viewBox="-8 0 696 28"',
   ]) {
     expect(row.source).toContain(piece);
   }
@@ -1116,6 +1142,23 @@ const spawn = ($: Engine, description = "勘察 ⑳") =>
     subagentType: "sonnet-xhigh",
     background: true,
   } as never);
+
+test("every image in the band is equally wide and leaves the same margin on both sides of what it draws", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await spawn($);
+
+  const frames = (await stackOn($)).map((one) =>
+    (/viewBox="(\S+) 0 (\S+) \d+" width="(\S+)"/.exec(one.source) ?? []).slice(1).map(Number),
+  );
+  // 子代理行、进度行、仪表各一张。内容都画在 0 到 680 之间,图两边各多出 8 像素:
+  // 宿主把每张图居中摆,两边一样宽内容才还在原处;三张一样宽,窗口窄到要缩小时才缩得一样多、上下对得齐。
+  expect(frames).toEqual([
+    [-8, 696, 696],
+    [-8, 696, 696],
+    [-8, 696, 696],
+  ]);
+});
 
 test("a subagent gets a row of its own above the reported rows, counting its model requests while the main loop is idle", async ($, on) => {
   const use = await sessionAfter($, on, [36_400]);

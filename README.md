@@ -132,6 +132,7 @@ vp run test        # 跑测试
 | `hooks/card.ts`        | 仪表那一行                            |
 | `hooks/progress.ts`    | 进度行和子代理行                      |
 | `hooks/forecast.ts`    | 分档与读数换算                        |
+| `hooks/frame.ts`       | 每张图共用的外框:多宽、两边留多少边   |
 | `types/index.d.ts`     | 状态的形状                            |
 | `context-band.test.ts` | 测试                                  |
 

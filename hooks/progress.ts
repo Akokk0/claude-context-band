@@ -10,6 +10,7 @@
 // 不画自己的底,亮色写成属性、暗色在 <style> 里覆盖,动画只在「这次画的和上一次不一样」时带上,样式全写在 <style> 里。
 
 import type { Agent, Phase, Row, RowStatus } from "../types";
+import { WIDTH, svgOf } from "./frame";
 
 /** 记着的行最多几行,记着的都画:再多,最久没报的让出来(报的人跑偏了也不至于把屏幕占满)。 */
 export const KEPT = 10;
@@ -44,8 +45,6 @@ const WALK_IN = 8;
 const WALK_FADE = 7;
 export const ROW_HEIGHT = 28;
 
-const ROW_WIDTH = 680;
-const FONT = "'PingFang SC', 'Microsoft YaHei', 'Source Han Sans', 'Noto Sans CJK', sans-serif";
 const EASE_IN_OUT = "cubic-bezier(0.77,0,0.175,1)";
 
 const DISC = 10;
@@ -426,7 +425,7 @@ export function agentSvg(agent: Agent, options: { now: number }): string {
         ? ICONS.done
         : '<g class="pr-icon" fill="#fff"><rect x="-3.4" y="-3.4" width="6.8" height="6.8" rx="1.4"/></g>';
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${ROW_WIDTH} ${ROW_HEIGHT}" width="${ROW_WIDTH}" height="${ROW_HEIGHT}" role="img" font-family="${FONT}">`,
+    svgOf(ROW_HEIGHT),
     "<style>",
     ":root{color-scheme:light dark}",
     "text{font-variant-numeric:tabular-nums}",
@@ -456,7 +455,7 @@ export function agentSvg(agent: Agent, options: { now: number }): string {
     `<g transform="translate(${TRACK_X} ${TRACK_Y})"><rect width="${pillW}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${look.to}"/>`,
     `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${label}</text></g>`,
     "</g>",
-    `<text class="pr-ink" x="${ROW_WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${minutes < 1 ? "刚开始" : `${minutes} 分`}</text>`,
+    `<text class="pr-ink" x="${WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${minutes < 1 ? "刚开始" : `${minutes} 分`}</text>`,
     "</g></svg>",
   ].join("");
 }
@@ -595,7 +594,7 @@ export function rowSvg(
     : "";
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${ROW_WIDTH} ${ROW_HEIGHT}" width="${ROW_WIDTH}" height="${ROW_HEIGHT}" role="img" font-family="${FONT}">`,
+    svgOf(ROW_HEIGHT),
     "<style>",
     ":root{color-scheme:light dark}",
     "text{font-variant-numeric:tabular-nums}",
@@ -644,7 +643,7 @@ export function rowSvg(
     `<g transform="translate(${TRACK_X} ${TRACK_Y})"><g class="pr-pill"><rect width="${pillW}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${look.pill}"/>`,
     `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${underWay ? `<tspan class="pr-now">${escape(pill)}</tspan>` : escape(pill)}</text></g></g>`,
     "</g>",
-    `<text class="pr-ink" x="${ROW_WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${countOf(row)}</text>`,
+    `<text class="pr-ink" x="${WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${countOf(row)}</text>`,
     "</g></svg>",
   ].join("");
 }

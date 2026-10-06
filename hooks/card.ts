@@ -13,15 +13,19 @@
 import type { Gauge as Shown, Limits, Quota, Turn } from "../types";
 import { HISTORY, LEVELS, barHeights, levelFor, remainingOf, short, spentText } from "./forecast";
 import type { Level, LevelKey } from "./forecast";
+import { GUTTER, svgOf } from "./frame";
 
-/** 这一行的大小,CSS 像素。沙箱框的高度也用这个数;宽度交给宿主,占满整条。 */
-const CARD_WIDTH = 680;
+/** 这一行的高度,CSS 像素。沙箱框的高度也用这个数;宽度交给宿主,占满整条(图自己多宽见 frame.ts)。 */
 export const CARD_HEIGHT = 56;
 const MID = CARD_HEIGHT / 2;
-const FONT = "'PingFang SC', 'Microsoft YaHei', 'Source Han Sans', 'Noto Sans CJK', sans-serif";
 
 // 上下文那一格:0 到 330。
 const AVATAR_R = 20;
+/**
+ * 龙卷风那圈波纹扩到头像的多少倍。头像贴着内容的左沿,扩到头时左边正好用完图留的那道边,
+ * 上下正好碰到这一行的边(半径 28,行高的一半)。再大就会被图的边界切掉:原先是 1.45 倍,左边被切掉 9 像素。
+ */
+const RIPPLE = 1 + GUTTER / AVATAR_R;
 const NAME_X = 52;
 const SPARK_PAD = 6;
 const BAR_W = 4;
@@ -102,7 +106,7 @@ export function cardSvg(
   const chart = turns(shown, history, level, options.working);
 
   return [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${CARD_WIDTH} ${CARD_HEIGHT}" width="${CARD_WIDTH}" height="${CARD_HEIGHT}" role="img" font-family="${FONT}">`,
+    svgOf(CARD_HEIGHT),
     `<style>${styleOf(gauges, options.now, fresh ? since : 0)}${chart.style}</style>`,
     defs(level, gauges),
     `<g class="cw-card${options.working ? " is-working" : ""}">`,
@@ -384,7 +388,7 @@ const MOTION = [
   "@keyframes cw-sway{from{transform:translateX(-2.6px)}to{transform:translateX(2.6px)}}",
   "@keyframes cw-lean{from{transform:rotate(-7deg)}to{transform:rotate(7deg)}}",
   "@keyframes cw-fling{from{transform:translate(0,0)}to{transform:translate(5px,-4px)}}",
-  "@keyframes cw-ripple{from{transform:scale(1);opacity:.45}to{transform:scale(1.45);opacity:0}}",
+  `@keyframes cw-ripple{from{transform:scale(1);opacity:.45}to{transform:scale(${RIPPLE});opacity:0}}`,
   "@keyframes cw-ghost{from{opacity:.25}to{opacity:.7}}",
   `.cw-pop{animation:cw-pop .22s ${EASE_OUT} var(--since) both}`,
   `.cw-rise{animation:cw-rise .2s ${EASE_OUT} var(--since) both}`,
