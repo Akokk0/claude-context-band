@@ -64,7 +64,7 @@ Claude 用 mod 带的工具报上来的。四种状态各有图标:
 
 ```bash
 claude plugin marketplace add Akokk0/claude-context-band
-claude plugin install context-band
+claude plugin install context-band@akokko
 ```
 
 **克隆到 skills 目录**,下个会话起自动加载:
