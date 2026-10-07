@@ -6,6 +6,7 @@
 // session.compact:压缩过,窗口落下去了,读数和起点跟着落。
 // turn.step:这一轮里每发完一次模型请求读一次,卡片在干活的时候就跟着动,不等答完。
 //   用的是接口给这次请求报的账(进去的加出来的),回应流的过程中不动。
+//   同一份账里还有缓存读了多少、写了多少:主对话的每次请求都记一笔,画成仪表底下那一条。
 // turn.complete:主循环答完一轮,这一轮涨了多少记成一根柱子,留最近 HISTORY 根。
 // session.start:还没有读数时先读一次,不等第一轮开始仪表就在。
 // session.measure:额度窗口挪了一个整点,宿主会推过来,两格额度跟着动。
@@ -26,7 +27,8 @@ import { atom, read, update } from "claude-code";
 import type { EngineInterface, Register } from "claude-code";
 
 import type { Card, Limits, Reading, Row, Turn } from "../types";
-import { CARD_HEIGHT, cardAlt, cardSvg } from "./card";
+import { lifeOf, tickIn, withRequest } from "./cache";
+import { IMAGE_HEIGHT, cardAlt, cardSvg } from "./card";
 import {
   ROW_HEIGHT,
   agentAlt,
@@ -78,7 +80,7 @@ const card = atom(
 type Measure = { now?: Reading; window?: number; limits?: Limits; at: number };
 
 /** 这一轮最后一次请求收完时窗口的读数,留给回合结束用。模块变量:热加载丢了就现读。 */
-let landing: { turnId: string; now?: Reading } | undefined;
+let landing: { turnId: string; now?: Reading; cached?: (shown: Card) => Card } | undefined;
 
 /**
  * 用接口给这次请求报的账把读数校准:输入的三样加起来是请求发出去时窗口里有多少,再加上这次回应的输出,
@@ -192,6 +194,8 @@ export const register: Register = (on) => {
     } catch {
       // 没有这个工具,进度行就一直是空的。
     }
+    // 热加载之后原先等着的那个定时器跟着旧模块没了:缓存还有效的话重新定。
+    await arm($);
     return result;
   });
 
@@ -286,6 +290,8 @@ export const register: Register = (on) => {
         return {
           ...shown,
           ...quotas(shown, measured),
+          // 对话换成了摘要,原来留在缓存里的那一段下一次本来就读不到:那一次重建不算没命中。
+          cache: shown.cache && { ...shown.cache, held: 0 },
           gauge: now
             ? { now, was: now, base: now.tokens, at: measured.at || (shown.gauge?.at ?? 0) }
             : shown.gauge,
@@ -337,11 +343,28 @@ export const register: Register = (on) => {
     }
     // 以压缩收场的请求不是读数:它的账是压之前的大小,窗口随后就落下去了,落到多少由 session.compact 那边管。
     if (result.stopReason === "compaction") return result;
-    const measured = withBill(await measure($), result.usage);
+    const taken = await measure($);
+    const measured = withBill(taken, result.usage);
+    // 缓存的账每次请求都记:进去多少、读出来多少、这一刻起缓存又能用一整段。
+    const bill = result.usage;
+    const cached = (shown: Card): Card =>
+      bill
+        ? {
+            ...shown,
+            cache: withRequest(
+              shown.cache,
+              bill,
+              taken.now?.tokens,
+              measured.at,
+              lifeOf({ ...shown.limits, ...measured.limits }),
+            ),
+          }
+        : shown;
     if (result.stopReason !== "tool_use" && result.stopReason !== "pause_turn") {
-      landing = { turnId: e.turnId, now: measured.now };
+      landing = { turnId: e.turnId, now: measured.now, cached };
     } else {
-      await draw($, measured, (shown) => {
+      await draw($, measured, (before) => {
+        const shown = cached(before);
         const { now, at } = measured;
         const gauge = shown.gauge;
         // 写出来和卡片上现有的一模一样就什么都不碰,连读数的时刻也不碰:图一个字不变,宿主没有东西可换。
@@ -353,6 +376,7 @@ export const register: Register = (on) => {
           gauge: { now, was: gauge?.now ?? now, base: gauge?.base ?? now.tokens, at },
         };
       });
+      await arm($);
     }
     return result;
   });
@@ -373,11 +397,13 @@ export const register: Register = (on) => {
       // 最后一次请求留下的读数最准(它算上了那次回应);没有的话(这一轮没发过请求,或者中途热加载过)现读。
       const last = landing?.turnId === e.turnId ? landing : undefined;
       const landed = last?.now;
+      const cached = last?.cached ?? ((shown: Card) => shown);
       landing = undefined;
       // 没读到数也要把「在跑」撤掉(被打断的那一轮常常这样),不然卡片一直是干活的样子。
       const taken = await measure($);
       const measured = landed ? { ...taken, now: landed } : taken;
-      await draw($, measured, (shown) => {
+      await draw($, measured, (before) => {
+        const shown = cached(before);
         const { now, at } = measured;
         const rows = settled(shown.rows ?? []);
         const agents = withoutEndedAgents(shown.agents ?? []);
@@ -399,6 +425,7 @@ export const register: Register = (on) => {
           },
         };
       });
+      await arm($);
     }
     return result;
   });
@@ -412,6 +439,7 @@ export const register: Register = (on) => {
       running,
       rows: all,
       agents: sent,
+      cache,
     } = await read($, card);
     const rows = shownRows(all ?? []);
     const agents = shownAgents(sent ?? []);
@@ -458,9 +486,10 @@ export const register: Register = (on) => {
                 limitsAt,
                 now: drawnAt,
                 since: drawnAt - shown.at,
+                cache,
               })}
-              alt={cardAlt(shown, history, quota)}
-              height={CARD_HEIGHT}
+              alt={cardAlt(shown, history, quota, cache)}
+              height={IMAGE_HEIGHT}
             />
           ) : null}
         </Box>
@@ -597,6 +626,36 @@ async function restore($: EngineInterface): Promise<void> {
     }
   } catch {
     // 盘读不了:行先空着,下一次写之前再试;清到一半断了的,下回进程起来接着清。
+  }
+}
+
+/** 缓存那一条等着的下一回重画,和它是第几回定的(后定的作数)。模块变量:热加载丢了就在会话开始时重新定。 */
+let ticking: { cancel: () => void } | undefined;
+let armed = 0;
+
+/**
+ * 缓存还有效的时候,带子每分钟自己重画一回:分钟数一变就画,过期那一下画最后一回,之后不再画。
+ * 没有它的话,闲着时没人重画带子,那一条全靠图自己的动画走;应用窗口被挡住时动画是停的,
+ * 回来后线比实际长(主人在真带子上看到的)。
+ * 每收完一次主对话的请求重新定一回(缓存回满了,分钟从这一刻起数),原先等着的那个作废。
+ */
+async function arm($: EngineInterface): Promise<void> {
+  const mine = ++armed;
+  ticking?.cancel();
+  ticking = undefined;
+  try {
+    const { cache } = await read($, card);
+    if (!cache) return;
+    const left = cache.at + cache.life - (await $.clock.now());
+    // 读钟的工夫别处又定了一回:让后定的那个作数。
+    if (left <= 0 || mine !== armed) return;
+    // 作废的那个不用在这里再拦一道:重新定的时候已经 cancel 了,cancel 过的不会再到点。
+    ticking = $.clock.after(tickIn(left), () => {
+      $.ui.invalidate("ui.render");
+      void arm($);
+    });
+  } catch {
+    // 定不上(宿主不给定时器):那一条退回到只靠图自己的动画走。
   }
 }
 

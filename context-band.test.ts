@@ -58,6 +58,19 @@ const wire = {
   stop: null as string | null,
   after: undefined as number | undefined,
 };
+/**
+ * 宿主那一层的定时器:mod 要过哪些(各等多久)、叫宿主重画过几回带子。`fire` 让那一个到点。
+ * 没人去 fire 的就一直不到点。
+ */
+const timers = { waits: [] as { ms: number; fire: () => void }[], redraws: 0 };
+/** 最近要的那个定时器到点:钟走到那儿,等它带起来的活做完。 */
+async function tick() {
+  const wait = timers.waits[timers.waits.length - 1];
+  clock.now += wait.ms;
+  wait.fire();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** 每次读宿主的用量之前叫一声,测试用它在读到一半时让宿主改口。 */
 const reads = { onRead: (): void | Promise<void> => {} };
 const SUMMARY = { role: "user" as const, text: "summary", toolUses: [] };
@@ -163,6 +176,19 @@ async function sessionAfter(
     return { value: undefined };
   });
   on("session.measure", async (_, e) => ({ changed: [...e.changed] }));
+  timers.waits = [];
+  timers.redraws = 0;
+  on(
+    "clock.after",
+    (_, e) =>
+      new Promise<{ value: undefined }>((resolve) => {
+        timers.waits.push({ ms: e.ms, fire: () => resolve({ value: undefined }) });
+      }),
+  );
+  on("ui.invalidate", async (_, e) => {
+    if (e.event === "ui.render") timers.redraws += 1;
+    return { value: undefined };
+  });
   on("turn.start", async (_, e) => ({ turnId: e.turnId }));
   wire.pieces = [];
   wire.silent = false;
@@ -291,8 +317,9 @@ test("the card is drawn as an image as wide as the band and as tall as the row, 
     // 高度必须给:宿主不会从 SVG 里读,不给就是 150 高、内容缩在里面。
     // 宽度不给:给了固定宽度的话它会贴在左边,右边空一截。
     expect(card?.props.width).toBeUndefined();
-    expect(card?.props.height).toBe(56);
-    expect(String(card?.props.source)).toContain('viewBox="-8 0 696 56" width="696" height="56"');
+    // 仪表本身 56 高,底下缓存那一条 24 高(线和小字之间要留出空,挨着不好看):那一条从一开始就在,有没有读数图都一样高。
+    expect(card?.props.height).toBe(80);
+    expect(String(card?.props.source)).toContain('viewBox="-8 0 696 80" width="696" height="80"');
   }
 });
 
@@ -2463,4 +2490,369 @@ test("a bill that is not a whole number of passes over what the host read is tak
   await step($);
 
   expect(await sourceOn($)).toContain(">上下文 97k / 200k<");
+});
+
+/** 接口给一次请求报的账,缓存那几样各是多少由测试说。 */
+const cachedBill = (input: number, read: number, written: number, output = 500): Bill => ({
+  input_tokens: input,
+  cache_read_input_tokens: read,
+  cache_creation_input_tokens: written,
+  output_tokens: output,
+  model: "m",
+});
+
+/** 仪表底下缓存那一条右边的字。 */
+const cacheSays = (source: string) =>
+  /class="cw-sub cc-says"[^>]*>(.*?)<\/text>/.exec(source)?.[1].replace(/<[^>]+>/g, "");
+
+test("the strip under the gauges is there from the start, empty; once a request has gone through the prompt cache it says how much of everything sent the cache served", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  // 还没有哪次请求报过缓存:那一条已经在了(图不会等有了读数再变高),线是空的,照实说还没有读数。
+  const empty = await cardOn($);
+  expect(empty?.props.height).toBe(80);
+  expect(String(empty?.props.source)).toContain(">缓存 · 还没有读数<");
+  // 线在 58 到 61,小字的基线在 76:字顶离线有六七个像素(基线在 72 时只隔三个,主人说挨得太紧;80 那一版主人让退回这一版)。
+  expect(String(empty?.props.source)).toContain(
+    'class="cw-track" x="0" y="58" width="680" height="3"',
+  );
+  expect(String(empty?.props.source)).toContain('class="cw-sub cc-none" x="0" y="76"');
+  expect(String(empty?.props.source)).not.toContain("cc-left");
+  expect(cacheSays(String(empty?.props.source))).toBeUndefined();
+  expect(empty?.props.alt).not.toContain("缓存");
+
+  await begin($);
+  use(40_000);
+  // 进去 40 000:缓存里读出来 30 000,新写进去 9 000,没走缓存的 1 000。
+  wire.bill = cachedBill(1_000, 30_000, 9_000);
+  await step($);
+  let card = await cardOn($);
+  expect(card?.props.height).toBe(80);
+  expect(String(card?.props.source)).toContain('viewBox="-8 0 696 80" width="696" height="80"');
+  expect(cacheSays(String(card?.props.source))).toBe("命中 75% · 没命中 0 次");
+
+  // 命中率是整个会话的:两次一共进去 82 000,读出来 70 000。
+  use(42_000);
+  wire.bill = cachedBill(500, 40_000, 1_500);
+  await step($);
+  card = await cardOn($);
+  expect(cacheSays(String(card?.props.source))).toBe("命中 85% · 没命中 0 次");
+  expect(card?.props.alt).toContain("缓存命中 85%,没命中 0 次");
+});
+
+test("a session whose requests report no cache at all keeps the empty strip: there is still nothing to read", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  use(40_000);
+  wire.bill = cachedBill(40_000, 0, 0);
+  await step($);
+
+  const card = await cardOn($);
+  expect(card?.props.height).toBe(80);
+  expect(String(card?.props.source)).toContain(">缓存 · 还没有读数<");
+  expect(String(card?.props.source)).not.toContain("cc-says");
+});
+
+/** 主对话收完一次请求,缓存那几样照给的数报;交回这之后那一条右边的字。 */
+async function requestThrough(
+  $: Engine,
+  use: (tokens: number) => void,
+  [input, read, written]: readonly [number, number, number],
+) {
+  use(input + read + written);
+  wire.bill = cachedBill(input, read, written);
+  await step($);
+  return cacheSays(await sourceOn($));
+}
+
+test("a request that had to process again what the cache already held counts as a miss; a shortfall too small to matter does not", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  // 头一次请求没有什么本来读得到的:全是新写的,不算没命中。
+  expect(await requestThrough($, use, [1_000, 0, 19_000])).toBe("命中 0% · 没命中 0 次");
+  // 上一次留下 20 000,这一次读出来 18 500:少了 1 500,占了 7.5%,但不到 2 000 个,不算。
+  expect(await requestThrough($, use, [500, 18_500, 23_000])).toBe("命中 29% · 没命中 0 次");
+  // 上一次留下 42 000,这一次只读出来 10 000:缓存断了。
+  expect(await requestThrough($, use, [500, 10_000, 33_500])).toBe("命中 26% · 没命中 1 次");
+  // 接上之后照常读,次数不再涨。
+  expect(await requestThrough($, use, [500, 44_000, 1_500])).toBe("命中 47% · 没命中 1 次");
+});
+
+test("the rebuild after a compaction is expected: it is not a miss", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  await requestThrough($, use, [1_000, 150_000, 9_000]);
+  wire.last = true;
+  await requestThrough($, use, [500, 160_000, 1_500]);
+  await $.turn.complete(TURN);
+
+  // 压缩把对话换成了一段摘要:下一次请求读不到原来那 162 000 是应该的。
+  use(40_000);
+  compacted.done = true;
+  await $.session.compact({ trigger: "manual", messages: [SUMMARY] });
+  wire.last = false;
+  await begin($);
+  expect(await requestThrough($, use, [500, 12_000, 30_000])).toContain("没命中 0 次");
+});
+
+test("a request the server ran twice reads the cache twice over: it is compared one pass at a time, and a real miss in it still counts", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  await requestThrough($, use, [1_000, 50_000, 7_420]);
+  // 两遍各带着 58 420 进去,账是两遍加起来的:读出来 116 000,平到一遍是 58 000,和留下的 58 420 对得上。
+  use(58_420);
+  wire.bill = cachedBill(40, 116_000, 800);
+  await step($);
+  expect(cacheSays(await sourceOn($))).toContain("没命中 0 次");
+  // 它留在缓存里的也是一遍的量(58 420),不是两遍加起来的:下一次照常读出来 58 300,不算少。
+  expect(await requestThrough($, use, [100, 58_300, 600])).toContain("没命中 0 次");
+  // 又是两遍,这回缓存是凉的:头一遍什么都没读到、全是新写的,第二遍才读到头一遍写的。
+  // 两遍合起来读出来 59 000,看着和留下的一样多,平到一遍只有一半。
+  use(59_000);
+  wire.bill = cachedBill(40, 59_000, 58_960);
+  await step($);
+  expect(cacheSays(await sourceOn($))).toContain("没命中 1 次");
+});
+
+/** 缓存那一条左边的字:还有效时写的、过期时写的。画的那一刻还有效的话两句都在图里,过期那句等着到点再亮。 */
+const cacheWords = (source: string) => {
+  const of = (cls: string) =>
+    new RegExp(`class="cw-sub ${cls}"[^>]*>(.*?)</text>`).exec(source)?.[1].replace(/<[^>]+>/g, "");
+  return { live: of("cc-live"), gone: of("cc-gone") };
+};
+
+const MINUTE = 60_000;
+
+test("the line under the gauges is how long the cache still lasts: it runs down by itself from the last request, and the words turn over when it runs out", async ($, on) => {
+  // 走订阅、额度没用完:主对话的缓存是一小时的。
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+
+  // 一刻钟之后带子被重画(没有新的请求):还剩四分之三,线从那儿接着往下走 45 分钟,不用再有人来画。
+  clock.now += 15 * MINUTE;
+  let source = await sourceOn($);
+  expect(source).toContain('<rect class="cc-left"');
+  expect(source).toContain(
+    ".cc-left{transform:scaleX(0.75);animation:cc-drain 2700000ms linear both !important}",
+  );
+  expect(source).toContain(
+    "@keyframes cc-drain{from{transform:scaleX(0.75)}to{transform:scaleX(0)}}",
+  );
+  expect(cacheWords(source)).toEqual({
+    live: "缓存还能用 45 分 · 1 小时档",
+    gone: "缓存已过期 · 下一条重读 40.5k",
+  });
+  // 到点那一下两句话换过来,也是图自己换。
+  expect(source).toContain(
+    ".cc-live{animation:cc-flip 1ms linear 2700000ms both reverse !important}",
+  );
+  expect(source).toContain(
+    ".cc-gone{opacity:0;animation:cc-flip 1ms linear 2700000ms both !important}",
+  );
+
+  // 又一次请求:缓存从这一刻起又能用一整段。
+  clock.now += 15 * MINUTE;
+  await requestThrough($, use, [500, 40_000, 1_500]);
+  expect(await sourceOn($)).toContain(
+    ".cc-left{transform:scaleX(1);animation:cc-drain 3600000ms linear both !important}",
+  );
+});
+
+test("a band drawn after the cache has run out says so outright: no line, and what the next message will have to read again", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+
+  clock.now += 61 * MINUTE;
+  const source = await sourceOn($);
+  expect(source).not.toContain("cc-left");
+  expect(source).not.toContain("cc-live");
+  expect(source).not.toContain("cc-flip");
+  expect(source).toContain('class="cw-sub cc-cold"');
+  expect(source).toContain(">缓存已过期 · 下一条重读 <");
+  expect(cacheSays(source)).toBe("命中 75% · 没命中 0 次");
+});
+
+for (const [name, limits] of [
+  ["an account with no quota windows (an API key)", []],
+  [
+    "a subscription that has used a window up and runs on credits",
+    [{ kind: "five_hour", percentUsed: 100, resetsAt: "2026-10-04T06:40:00.000Z" }, LIMITS[1]],
+  ],
+] as const) {
+  test(`the cache of ${name} lasts five minutes`, async ($, on) => {
+    const use = await sessionAfter($, on, [0, 36_400], limits);
+    await begin($);
+    await requestThrough($, use, [1_000, 30_000, 9_000]);
+
+    clock.now += MINUTE;
+    const source = await sourceOn($);
+    expect(cacheWords(source).live).toBe("缓存还能用 4 分 · 5 分钟档");
+    expect(source).toContain(
+      ".cc-left{transform:scaleX(0.8);animation:cc-drain 240000ms linear both !important}",
+    );
+  });
+}
+
+test("a shortfall that is a sliver of a large cache is not a miss, however many tokens it is", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  await requestThrough($, use, [1_000, 150_000, 9_000]);
+  // 留下 160 000,读出来 157 000:少了 3 000,过了 2 000 那条线,但不到 5%。
+  expect(await requestThrough($, use, [500, 157_000, 4_500])).toContain("没命中 0 次");
+});
+
+test("the last request of a turn counts too: its share lands with the turn, in the same single change", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+  const before = await sourceOn($);
+
+  clock.now += 10 * MINUTE;
+  wire.last = true;
+  use(42_000);
+  wire.bill = cachedBill(500, 40_000, 1_500);
+  await step($);
+  // 最后一次请求不单独换图(钟走了,所以只比那一条上的字)。
+  expect(cacheSays(await sourceOn($))).toBe(cacheSays(before));
+
+  await $.turn.complete(TURN);
+  const source = await sourceOn($);
+  expect(cacheSays(source)).toBe("命中 85% · 没命中 0 次");
+  // 缓存从最后那次请求收完起算,不从回合开头:此刻是满的。
+  expect(source).toContain(".cc-left{transform:scaleX(1);");
+});
+
+test("a subagent's requests stay out of the cache strip: its cache is its own", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  use(40_000);
+  wire.bill = cachedBill(1_000, 30_000, 9_000);
+  await step($, { agentId: spawned.id });
+
+  // 带上有它自己的一行和仪表两张图,哪张都没有缓存那一条。
+  const stack = await stackOn($);
+  expect(stack.length).toBe(2);
+  for (const one of stack) expect(one.source).not.toContain("cc-says");
+});
+
+test("which lifetime a cache has is settled when the request is made: a quota window that resets afterwards does not bring a cache that has run out back to life", async ($, on) => {
+  // 5 小时额度用完了,这次请求走的是另算的用量:缓存只有五分钟。
+  const spent = [
+    { kind: "five_hour", percentUsed: 100, resetsAt: "2026-10-04T04:46:00.000Z" },
+    LIMITS[1],
+  ];
+  const use = await sessionAfter($, on, [0, 36_400], spent);
+  await begin($);
+  wire.last = true;
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+  await $.turn.complete(TURN);
+
+  // 歇了二十分钟,额度窗口重置了,宿主推来新读数:带子重画。缓存十五分钟前就过期了,不能因为额度回来了就画成有效。
+  clock.now += 20 * MINUTE;
+  await $.session.measure({
+    context: usageOf(40_500, []).context,
+    rateLimits: [{ kind: "five_hour", percentUsed: 0, resetsAt: "2026-10-04T09:46:00.000Z" }],
+    changed: ["rateLimits"],
+  });
+  const source = await sourceOn($);
+  expect(source).toContain(">5 小时<");
+  expect(source).toContain(">0%<");
+  expect(source).toContain('class="cw-sub cc-cold"');
+  expect(source).not.toContain("cc-left");
+});
+
+test("with motion reduced the line still runs down and the words still turn over: the strip is a clock, not an effect", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+
+  const source = await sourceOn($);
+  // 减少动态效果那条规则把卡片里的动画全停了;这三样是在报时,停了的话过期那句话永远不出来。
+  const reduced = /@media \(prefers-reduced-motion:reduce\)\{(.*?)\}\}/.exec(source)?.[1] ?? "";
+  expect(reduced).toContain(".cw-card *{animation:none !important}");
+  for (const cls of ["cc-left", "cc-live", "cc-gone"])
+    expect(source).toMatch(new RegExp(`\\.cw-card \\.${cls}\\{[^}]*animation:[^}]* !important\\}`));
+});
+
+test("a reading that leaves a quota window out does not forget that the window was used up: the cache still lasts five minutes", async ($, on) => {
+  const use = await sessionAfter(
+    $,
+    on,
+    [0, 36_400],
+    [{ kind: "five_hour", percentUsed: 100, resetsAt: "2026-10-04T06:40:00.000Z" }, LIMITS[1]],
+  );
+  await begin($);
+  // 请求收完时读到的额度只带了本周那一个窗口:5 小时那一格留着原来的 100%,档位也照它算。
+  use(40_000, [LIMITS[1]]);
+  wire.bill = cachedBill(1_000, 30_000, 9_000);
+  await step($);
+
+  expect(cacheWords(await sourceOn($)).live).toBe("缓存还能用 5 分 · 5 分钟档");
+});
+
+test("while the cache lasts the band is drawn again each time the minutes left change, so the count stays true with nobody touching it; once the cache has run out the redraws stop", async ($, on) => {
+  // 应用窗口被挡住的时候图自己的动画是停的(主人在真带子上看到的),回来后线和字都落在后面。
+  // 所以缓存还有效的那段时间,带子每分钟自己重画一回;过期了就不再画。
+  const use = await sessionAfter(
+    $,
+    on,
+    [0, 36_400],
+    [{ kind: "five_hour", percentUsed: 100, resetsAt: "2026-10-04T06:40:00.000Z" }, LIMITS[1]],
+  );
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+  expect(cacheWords(await sourceOn($)).live).toBe("缓存还能用 5 分 · 5 分钟档");
+  // 下一回重画定在分钟数刚变的那一下(多等四分之一秒,免得钟差一点点还没变)。
+  expect(timers.waits.map((wait) => wait.ms)).toEqual([60_250]);
+  expect(timers.redraws).toBe(0);
+
+  await tick();
+  expect(timers.redraws).toBe(1);
+  expect(cacheWords(await sourceOn($)).live).toBe("缓存还能用 4 分 · 5 分钟档");
+  expect(timers.waits.map((wait) => wait.ms)).toEqual([60_250, 60_000]);
+
+  for (const left of [3, 2, 1]) {
+    await tick();
+    expect(cacheWords(await sourceOn($)).live).toBe(`缓存还能用 ${left} 分 · 5 分钟档`);
+  }
+  // 最后一回:到点了,画成过期的样子,之后不再定下一回。
+  await tick();
+  expect(timers.redraws).toBe(5);
+  expect(await sourceOn($)).toContain('class="cw-sub cc-cold"');
+  expect(timers.waits.length).toBe(5);
+});
+
+test("a new request starts the minute count over: the redraw that was waiting is dropped, not left to fire on top of the new one", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+  const first = timers.waits[0];
+
+  // 二十秒后又一次请求:缓存回满,下一回重画从这一刻起算一整分钟。
+  clock.now += 20_000;
+  await requestThrough($, use, [500, 40_000, 1_500]);
+  expect(timers.waits.map((wait) => wait.ms)).toEqual([60_250, 60_250]);
+
+  // 原先等着的那个就算到点也不作数。
+  first.fire();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(timers.redraws).toBe(0);
+  expect(timers.waits.length).toBe(2);
+});
+
+test("a session picked up with its cache still warm goes on counting the minutes down", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400], LIMITS);
+  await begin($);
+  wire.last = true;
+  await requestThrough($, use, [1_000, 30_000, 9_000]);
+  await $.turn.complete(TURN);
+  const armed = timers.waits.length;
+
+  // 热加载:模块重新装了一遍,原先等着的定时器跟着旧模块没了;会话再开始时按剩下的时间重新定。
+  clock.now += 90_000;
+  await $.session.start(START);
+  expect(timers.waits.length).toBe(armed + 1);
+  // 还剩 58 分 30 秒:半分钟后分钟数从 59 变成 58。
+  expect(timers.waits[timers.waits.length - 1].ms).toBe(30_250);
 });

@@ -10,14 +10,22 @@
 // 环境动画挂在根上的 is-working 底下,回合在跑才动。
 // 样式和动画一律写在 <style> 里,不写行内 style:哪一帧延迟多久、虚柱从多高长起,都是生成出来的规则。
 
-import type { Gauge as Shown, Limits, Quota, Turn } from "../types";
+import type { Cache, Gauge as Shown, Limits, Quota, Turn } from "../types";
+import { hitOf, lifeWord, minutesLeft } from "./cache";
 import { HISTORY, LEVELS, barHeights, levelFor, remainingOf, short, spentText } from "./forecast";
 import type { Level, LevelKey } from "./forecast";
-import { GUTTER, svgOf } from "./frame";
+import { GUTTER, WIDTH, svgOf } from "./frame";
 
 /** 这一行的高度,CSS 像素。沙箱框的高度也用这个数;宽度交给宿主,占满整条(图自己多宽见 frame.ts)。 */
 export const CARD_HEIGHT = 56;
 const MID = CARD_HEIGHT / 2;
+/** 底下缓存那一条有这么高:一道细线,下面一行小字。 */
+const CACHE_HEIGHT = 24;
+const CACHE_LINE_Y = CARD_HEIGHT + 2;
+const CACHE_TEXT_Y = CARD_HEIGHT + 20;
+
+/** 这张图多高:有缓存的账就多一条。 */
+export const IMAGE_HEIGHT = CARD_HEIGHT + CACHE_HEIGHT;
 
 // 上下文那一格:0 到 330。
 const AVATAR_R = 20;
@@ -71,13 +79,19 @@ function gaugesOf(limits: Limits): Gauge[] {
 }
 
 /** 读屏和画不了 Svg 的界面看到的那句话。 */
-export function cardAlt(shown: Shown, history: readonly Turn[], limits: Limits): string {
+export function cardAlt(
+  shown: Shown,
+  history: readonly Turn[],
+  limits: Limits,
+  cache?: Cache,
+): string {
   const { now } = shown;
   const last = history[history.length - 1];
   const context = `${levelFor(now.percent).word}:上下文 ${now.percent}%,${short(now.tokens)} / ${short(now.window)}${last ? `,${spentText(last.spent)}` : ""}`;
   return [
     context,
     ...gaugesOf(limits).map((gauge) => `${gauge.label} ${gauge.quota.percent}%`),
+    ...(cache ? [`缓存命中 ${hitOf(cache)}%,没命中 ${cache.misses} 次`] : []),
   ].join(";");
 }
 
@@ -94,7 +108,14 @@ const ENTRANCE_MS = 260;
 export function cardSvg(
   given: Shown,
   history: readonly Turn[],
-  options: { working: boolean; limits: Limits; limitsAt?: number; now: number; since: number },
+  options: {
+    working: boolean;
+    limits: Limits;
+    limitsAt?: number;
+    now: number;
+    since: number;
+    cache?: Cache;
+  },
 ): string {
   const since = Math.max(0, Math.round(options.since));
   const fresh = since < ENTRANCE_MS;
@@ -104,10 +125,11 @@ export function cardSvg(
   const changed = levelFor(was.percent).key !== level.key;
   const gauges = gaugesOf(options.limits);
   const chart = turns(shown, history, level, options.working);
+  const strip = cacheStrip(options.cache, options.now, now.tokens);
 
   return [
-    svgOf(CARD_HEIGHT),
-    `<style>${styleOf(gauges, options.now, fresh ? since : 0)}${chart.style}</style>`,
+    svgOf(IMAGE_HEIGHT),
+    `<style>${styleOf(gauges, options.now, fresh ? since : 0)}${chart.style}${strip.style}</style>`,
     defs(level, gauges),
     `<g class="cw-card${options.working ? " is-working" : ""}">`,
     avatar(level, changed),
@@ -127,6 +149,7 @@ export function cardSvg(
       const gauge = gauges[i];
       return gauge ? [quota(gauge, x, options.limitsAt ?? shown.at)] : [];
     }),
+    strip.body,
     "</g></svg>",
   ].join("");
 }
@@ -337,6 +360,64 @@ function quota(gauge: Gauge, x: number, now: number): string {
       : "",
     `<text class="cw-num g-${gauge.id}" x="${x + QUOTA_W}" y="35" text-anchor="end" font-size="20" font-weight="700" fill="url(#ink-${gauge.id}-light)">${gauge.quota.percent}%</text>`,
   ].join("");
+}
+
+/** 缓存那道线的颜色:带上别处都没用过的青绿(粉、黄、绿、蓝、紫各有各的意思)。 */
+const CACHE_INK = ["#5fd9d3", "#00a39e"] as const;
+
+/**
+ * 仪表底下缓存那一条:一道横贯的细线,下面一行小字。它不是重点(主人定的),所以不占图标、不单占一行。
+ *
+ * 线是「缓存还能用多久」:每收完一次请求回满,闲着就自己往下走,走完就是过期。
+ * 往下走和到点换字是图自己的动画,从画的这一刻起算,两回重画之间线也是顺着走的。
+ * 光靠它不够:应用窗口被挡住时图的动画是停的,回来后从停下的地方接着走(主人在真带子上看到的)。
+ * 所以缓存还有效的时候带子每分钟自己重画一回(register.tsx 的 `arm`),「还能用几分钟」的数也就写得了。
+ * 画的时候已经过期了就直接画过期的样子。
+ */
+function cacheStrip(
+  cache: Cache | undefined,
+  now: number,
+  tokens: number,
+): { style: string; body: string } {
+  const ink = (text: string | number) =>
+    `<tspan class="cw-ink" font-weight="700" fill="#18191C">${text}</tspan>`;
+  const words = (cls: string, text: string) =>
+    `<text class="cw-sub ${cls}" x="0" y="${CACHE_TEXT_Y}" font-size="10.5" fill="#666">${text}</text>`;
+  const track = `<rect class="cw-track" x="0" y="${CACHE_LINE_Y}" width="${WIDTH}" height="3" rx="1.5" fill="#000" fill-opacity="0.08"/>`;
+  // 还没有哪次请求报过缓存(会话刚开始、刚重载、应用重启后续上):这一条照样在,线是空的。
+  // 等有了读数再长出来的话,仪表会突然变高,刚开始那一阵也看不出有这样东西(主人定的)。
+  if (!cache) return { style: "", body: track + words("cc-none", "缓存 · 还没有读数") };
+  const gone = `缓存已过期 · 下一条重读 ${ink(short(tokens))}`;
+  const left = Math.round(cache.at + cache.life - now);
+  const isLive = left > 0;
+  const share = Number((Math.min(left, cache.life) / cache.life).toFixed(4));
+  return {
+    style: isLive
+      ? [
+          `@keyframes cc-drain{from{transform:scaleX(${share})}to{transform:scaleX(0)}}`,
+          "@keyframes cc-flip{from{opacity:0}to{opacity:1}}",
+          // 带上 .cw-card 和 !important:「减少动态效果」那条规则把卡片里的动画全停了,
+          // 这三样是在报时、不是效果,停了的话线不走、过期那句话也永远不出来。
+          `.cw-card .cc-left{transform:scaleX(${share});animation:cc-drain ${left}ms linear both !important}`,
+          `.cw-card .cc-live{animation:cc-flip 1ms linear ${left}ms both reverse !important}`,
+          `.cw-card .cc-gone{opacity:0;animation:cc-flip 1ms linear ${left}ms both !important}`,
+        ].join("")
+      : "",
+    body: [
+      isLive
+        ? `<linearGradient id="cc-ink" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="${CACHE_INK[0]}"/><stop offset="1" stop-color="${CACHE_INK[1]}"/></linearGradient>`
+        : "",
+      track,
+      isLive
+        ? `<rect class="cc-left" x="0" y="${CACHE_LINE_Y}" width="${WIDTH}" height="3" rx="1.5" fill="url(#cc-ink)"/>`
+        : "",
+      isLive
+        ? words("cc-live", `缓存还能用 ${minutesLeft(left)} 分 · ${lifeWord(cache.life)}`) +
+          words("cc-gone", gone)
+        : words("cc-cold", gone),
+      `<text class="cw-sub cc-says" x="${WIDTH}" y="${CACHE_TEXT_Y}" text-anchor="end" font-size="10.5" fill="#666">命中 ${ink(`${hitOf(cache)}%`)} · 没命中 ${ink(cache.misses)} 次</text>`,
+    ].join(""),
+  };
 }
 
 // 入场都用强的 ease-out、0.26 秒以内;循环的用 linear 或 ease-in-out。
