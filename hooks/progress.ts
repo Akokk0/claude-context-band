@@ -140,7 +140,7 @@ export function statusOf(row: Row): RowStatus {
 }
 
 /**
- * 行尾那个数:整件活做完了多少,分母是整件活,不是眼下这个阶段(「2期 1/1」那样的没有意思,主人指出来的)。
+ * 写成字的地方(回执、读屏、终端那一行)用的那个数;带子上行尾怎么画见 tailOf。整件活做完了多少,分母是整件活,不是眼下这个阶段(「2期 1/1」那样的没有意思,主人指出来的)。
  * 数的是做完的,不是「正在做第几个」:后一种写法开工时就是 1/4,旁边的百分比却是 0%,看着像做完了一步
  * (原先就是那样写的,主人指出来的)。
  * - 只有一个阶段:做完几步 / 一共几步,「9/18」。
@@ -495,6 +495,51 @@ function pillWidth(label: string): number {
   return Math.round(width);
 }
 
+/** 行尾那个小环:半径、线多粗。一个阶段超过 STEPS_MOST 步就切不出看得清的段了,画成一整段弧。 */
+const STEPS_R = 6.5;
+const STEPS_W = 3;
+const STEPS_MOST = 8;
+
+/**
+ * 行尾:一个分数,有时左边带一个小环。两样说的不是一件事(原先拼成一个带小数点的数「1.2/3」,主人说看着怪):
+ * - 分数数的是做完的:好几个阶段的行数阶段(「1/3」),只有一个阶段的行数步(「9/18」)。分子大、分母小一号。
+ * - 小环说的是眼下这个阶段走了几步:按它的步数切段,做完一步亮一段。眼下这个阶段只有一步、整行只有一个阶段
+ *   (分数说的已经是步数)、或者整件做完了,都不画:画了也没有新东西。
+ * 字多宽在这里量不出来,环的位置按每个字大约多宽估的。
+ */
+function tailOf(row: Row, color: string): string {
+  const current = currentOf(row);
+  const phases = row.phases.length;
+  const steps = totalOf(row.phases);
+  const [top, bottom] =
+    phases === 1
+      ? [current ? current.stepsDone : steps, steps]
+      : [current ? current.phasesDone : phases, phases];
+  const text = `<text class="pr-ink" x="${WIDTH}" y="18.5" text-anchor="end" font-size="14" font-weight="700" fill="#18191C">${top}<tspan class="pr-of" dx="1" font-size="10.5" font-weight="600" fill="#666">/${bottom}</tspan></text>`;
+  if (!current || phases === 1 || current.phase.steps === 1) return text;
+
+  const wide = 8.2 * String(top).length + 1 + 4.2 + 6.1 * String(bottom).length;
+  const all = current.phase.steps;
+  const cut = all <= STEPS_MOST;
+  const piece = 100 / all;
+  const gap = Math.min(6, piece * 0.26);
+  const lit = short(piece - gap);
+  const on = cut
+    ? Array.from({ length: current.stepsDone }, (_, k) =>
+        k === current.stepsDone - 1 ? `${lit} 100` : `${lit} ${short(gap)}`,
+      ).join(" ")
+    : `${short((100 * current.stepsDone) / all)} 100`;
+  return [
+    `<g class="pr-steps" transform="translate(${WIDTH - wide - 13} ${ROW_HEIGHT / 2}) rotate(-90)" fill="none" stroke-width="${STEPS_W}">`,
+    `<circle class="pr-steps-all" r="${STEPS_R}" pathLength="100" stroke="#000" stroke-opacity="0.13"${cut ? ` stroke-dasharray="${lit} ${short(gap)}"` : ""}/>`,
+    current.stepsDone > 0
+      ? `<circle r="${STEPS_R}" pathLength="100" stroke="${color}" stroke-dasharray="${on}"/>`
+      : "",
+    "</g>",
+    text,
+  ].join("");
+}
+
 const headOf = (done: number, total: number) => Math.round((TRACK_W * done) / total);
 /** 写进样式表的数:最多三位小数,零点几不带打头的 0。 */
 const short = (value: number) => String(Number(value.toFixed(3))).replace(/^0\./, ".");
@@ -598,7 +643,7 @@ export function rowSvg(
     "<style>",
     ":root{color-scheme:light dark}",
     "text{font-variant-numeric:tabular-nums}",
-    "@media (prefers-color-scheme:dark){.pr-ink{fill:#fff}.pr-track{fill:#fff;fill-opacity:.1}.pr-tick,.pr-edge{fill:#fff;fill-opacity:.3}}",
+    "@media (prefers-color-scheme:dark){.pr-ink{fill:#fff}.pr-track{fill:#fff;fill-opacity:.1}.pr-tick,.pr-edge{fill:#fff;fill-opacity:.3}.pr-of{fill:#bbb}.pr-steps-all{stroke:#fff;stroke-opacity:.2}}",
     `.pr-row{--at:-${options.now % 3_600_000}ms}`,
     `.pr-fill{transform:translateX(${head - TRACK_W}px)}`,
     `.pr-pill{transform:translateX(${pillAt(head)}px)}`,
@@ -643,7 +688,7 @@ export function rowSvg(
     `<g transform="translate(${TRACK_X} ${TRACK_Y})"><g class="pr-pill"><rect width="${pillW}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${look.pill}"/>`,
     `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${underWay ? `<tspan class="pr-now">${escape(pill)}</tspan>` : escape(pill)}</text></g></g>`,
     "</g>",
-    `<text class="pr-ink" x="${WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${countOf(row)}</text>`,
+    tailOf(row, look.to),
     "</g></svg>",
   ].join("");
 }

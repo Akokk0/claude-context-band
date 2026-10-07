@@ -950,7 +950,8 @@ test("a reported piece of work is a row under the gauges, and the report is ackn
   for (const piece of [
     ">切片 ⑳ · 图库合并<",
     '><tspan class="pr-now">施工</tspan><',
-    ">1.1/3<",
+    'fill="#18191C">1<tspan class="pr-of"',
+    ">/3</tspan></text>",
     'viewBox="-8 0 696 28"',
   ]) {
     expect(row.source).toContain(piece);
@@ -1417,8 +1418,11 @@ test("the pill names the phase under way and its name pulses; the count stands a
     'font-weight="700" fill="#fff"><tspan class="pr-now">2期</tspan></text>',
   );
   expect(source).toContain(
-    'text-anchor="end" font-size="13" font-weight="700" fill="#18191C">1/7</text>',
+    'text-anchor="end" font-size="14" font-weight="700" fill="#18191C">1<tspan class="pr-of"',
   );
+  expect(source).toContain(">/7</tspan></text>");
+  // 每一期只有一步:没有「这一期走到一半」可画,行尾不带那个小环。
+  expect(source).not.toContain('class="pr-steps"');
   expect(source).not.toContain("%</text>");
   expect(source).toContain(
     ".is-working .pr-now{animation:pr-now 1.4s ease-in-out var(--at) infinite alternate}",
@@ -1431,7 +1435,60 @@ test("a single phase reads the same way: its name on the pill, the steps at the 
 
   const { source } = (await drawingsOn($))[1];
   expect(source).toContain('fill="#fff"><tspan class="pr-now">切片</tspan></text>');
-  expect(source).toContain('fill="#18191C">9/18</text>');
+  expect(source).toContain('fill="#18191C">9<tspan class="pr-of"');
+  expect(source).toContain(">/18</tspan></text>");
+  // 只有一个阶段:分数说的已经是步数,再画一个环就是把同一件事说两遍。
+  expect(source).not.toContain('class="pr-steps"');
+});
+
+test("the end of a row says two different things: the fraction counts phases, the small ring counts the steps of the phase under way", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  // 勘察 2 步、施工 5 步、门禁 2 步。做完 3 步:勘察做完了,施工做了 5 步里的 1 步。
+  await report($, { done: 3 });
+  const first = (await drawingsOn($))[1].source;
+  // 原先这两样拼成一个带小数点的数「1.1/3」,主人说看着怪:现在分数只说做完 1 个阶段、共 3 个,分子大、分母小。
+  expect(first).toContain(
+    '<text class="pr-ink" x="680" y="18.5" text-anchor="end" font-size="14" font-weight="700" fill="#18191C">1<tspan class="pr-of" dx="1" font-size="10.5" font-weight="600" fill="#666">/3</tspan></text>',
+  );
+  expect(first).not.toContain("1.1/3");
+  // 小环在分数左边,按施工的 5 步切成 5 段(每段 14.8、空 5.2,一圈按 100 算),亮着 1 段。
+  expect(first).toContain('<g class="pr-steps" transform="translate(647.5 14) rotate(-90)"');
+  expect(first).toContain('stroke-dasharray="14.8 5.2"/>');
+  expect(first).toContain('stroke="#e84393" stroke-dasharray="14.8 100"/>');
+
+  await report($, { done: 4 });
+  expect((await drawingsOn($))[1].source).toContain('stroke-dasharray="14.8 5.2 14.8 100"/>');
+
+  // 环的颜色跟着这一行的状态走:等拍板是橙的。
+  await report($, { done: 4, status: "decide" });
+  expect((await drawingsOn($))[1].source).toContain(
+    'stroke="#e17055" stroke-dasharray="14.8 5.2 14.8 100"/>',
+  );
+
+  // 做完了:没有正在做的阶段,不画环。
+  await report($, { done: 9 });
+  const finished = (await drawingsOn($))[1].source;
+  expect(finished).toContain('fill="#18191C">3<tspan class="pr-of"');
+  expect(finished).not.toContain('class="pr-steps"');
+});
+
+test("a phase of more than eight steps cannot be cut into readable pieces: its ring is one arc", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "long",
+    title: "迁移",
+    phases: [
+      { name: "准备", steps: 1 },
+      { name: "回填", steps: 12 },
+    ],
+    done: 6,
+  });
+  const { source } = (await drawingsOn($))[1];
+  // 回填做了 12 步里的 5 步:一整圈的底,亮着十二分之五。
+  expect(source).toContain(
+    '<circle class="pr-steps-all" r="6.5" pathLength="100" stroke="#000" stroke-opacity="0.13"/>',
+  );
+  expect(source).toContain('stroke-dasharray="41.667 100"/>');
 });
 
 for (const [name, input, text] of [
@@ -2351,8 +2408,8 @@ test("the mod brings its own usage note into the conversation, after whatever th
     expect(note).toContain(piece);
   // 这段说明子代理的对话里也收得到(真机上看过),得有一句直接说给它听。
   expect(note).toContain("你自己就是被派出去的子代理时不要报");
-  // 胶囊上带不带小数只看眼下这个阶段,说明得跟着实现说。
-  expect(note).toContain("只有一步的阶段不带小数");
+  // 行尾带不带小环只看眼下这个阶段分不分步,说明得跟着实现说。
+  expect(note).toContain("眼下这个阶段自己还分步时,分数左边多一个小环");
   // 说明里写的工具名就是真会应答的那个:照着它去调,拿得到回执。
   const [tool] = note.match(/mcp__[a-z-]+__progress/) ?? [];
   const answer = await $.tool.call({
