@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "context-band",
-      "description": "A band above the prompt: context-window weather, usage limits, progress rows and subagent rows",
+      "description": "A band above the prompt: context-window weather, usage limits, prompt cache, progress rows and subagent rows",
       "author": { "name": "Akokko" },
       "source": "./",
       "category": "productivity"
