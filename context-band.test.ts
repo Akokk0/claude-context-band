@@ -2856,3 +2856,17 @@ test("a session picked up with its cache still warm goes on counting the minutes
   // 还剩 58 分 30 秒:半分钟后分钟数从 59 变成 58。
   expect(timers.waits[timers.waits.length - 1].ms).toBe(30_250);
 });
+
+test("the usage note tells the model to send a progress report in the same message as its next action, not as a turn of its own", async ($, on) => {
+  // 报进度单独占一轮,就白白多等一次模型的回应(这场会话里量过:窗口大了以后一轮要十几秒,
+  // 而工具本身几乎不花时间。看上去就是「进度条动了,人却卡着」,主人看出来的)。
+  on("prompt.context", async (_, e) => ({ blocks: [...e.blocks] }));
+  await sessionAfter($, on, [36_400]);
+
+  const { blocks } = await $.prompt.context({ blocks: [] } as never);
+  const note = blocks.find((block) => block.name === "contextBand")?.text ?? "";
+  expect(note).toContain("同一条消息");
+  expect(note).toContain("不要单独占一轮");
+  // 工具自己的说明里也有:说明那段有的环境要等用到才取,工具的说明是模型调用时一定看得到的。
+  expect(JSON.stringify(host.tools)).toContain("同一条消息");
+});
