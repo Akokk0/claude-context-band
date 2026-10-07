@@ -2870,3 +2870,49 @@ test("the usage note tells the model to send a progress report in the same messa
   // 工具自己的说明里也有:说明那段有的环境要等用到才取,工具的说明是模型调用时一定看得到的。
   expect(JSON.stringify(host.tools)).toContain("同一条消息");
 });
+
+test("the step in hand shows on the ring too: its piece is drawn paler than the finished ones and pulses while the turn runs", async ($, on) => {
+  // 原先正在做的那一段和还没做的一样是灰的,环上看不出眼下走到哪一段(主人看出来的)。
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  // 施工 5 步里做完 1 步:第 2 段正在做。它从第 1 段后面起(一段连空占 20),和做完的一样长,颜色淡一半。
+  await report($, { done: 3 });
+  const running = (await drawingsOn($))[1].source;
+  expect(running).toContain(
+    '<circle class="pr-step-now" r="6.5" pathLength="100" stroke="#e84393" stroke-opacity="0.5" stroke-dasharray="14.8 100" stroke-dashoffset="-20"/>',
+  );
+  // 回合在跑的时候它一明一暗,和胶囊上的阶段名一个节奏;回合停了就停在淡色上。
+  expect(running).toContain("@keyframes pr-stepnow{from{stroke-opacity:.5}to{stroke-opacity:.15}}");
+  expect(running).toContain(
+    ".is-working .pr-step-now{animation:pr-stepnow 1.4s ease-in-out var(--at) infinite alternate}",
+  );
+
+  // 这个阶段一步都还没做完:没有亮着的段,正在做的是第 1 段。
+  await report($, { done: 2 });
+  const fresh = (await drawingsOn($))[1].source;
+  expect(fresh).toContain('stroke-dasharray="14.8 100" stroke-dashoffset="0"/>');
+  expect(fresh).not.toContain('stroke="#e84393" stroke-dasharray="14.8 100"/>');
+
+  // 等拍板的行也一样画,颜色跟着状态走。
+  await report($, { done: 4, status: "decide" });
+  expect((await drawingsOn($))[1].source).toContain(
+    'class="pr-step-now" r="6.5" pathLength="100" stroke="#e17055" stroke-opacity="0.5" stroke-dasharray="14.8 100" stroke-dashoffset="-40"/>',
+  );
+});
+
+test("on a ring that is one arc the step in hand is the next twelfth after the lit part", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, {
+    plan: "long",
+    title: "迁移",
+    phases: [
+      { name: "准备", steps: 1 },
+      { name: "回填", steps: 12 },
+    ],
+    done: 6,
+  });
+  // 回填做了 12 步里的 5 步:亮到 41.667,正在做的那一步从那儿起,占十二分之一。
+  expect((await drawingsOn($))[1].source).toContain(
+    'stroke-dasharray="8.333 100" stroke-dashoffset="-41.667"/>',
+  );
+});

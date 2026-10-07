@@ -535,6 +535,9 @@ function tailOf(row: Row, color: string): string {
     current.stepsDone > 0
       ? `<circle r="${STEPS_R}" pathLength="100" stroke="${color}" stroke-dasharray="${on}"/>`
       : "",
+    // 正在做的那一步:接在亮着的后面,和它们一样长,颜色淡一半;回合在跑时一明一暗(样式在 rowSvg 里)。
+    // 没有它的话这一段和还没做的一样是灰的,环上看不出眼下走到哪了(主人看出来的)。
+    `<circle class="pr-step-now" r="${STEPS_R}" pathLength="100" stroke="${color}" stroke-opacity="0.5" stroke-dasharray="${cut ? lit : short(piece)} 100" stroke-dashoffset="${short(-current.stepsDone * piece)}"/>`,
     "</g>",
     text,
   ].join("");
@@ -664,6 +667,9 @@ export function rowSvg(
     // 正在做的那个阶段的字一明一暗:还没做完。只动透明度,幅度小、周期长,不是闪。
     "@keyframes pr-now{from{fill-opacity:1}to{fill-opacity:.45}}",
     ".is-working .pr-now{animation:pr-now 1.4s ease-in-out var(--at) infinite alternate}",
+    // 行尾小环上正在做的那一段,和阶段名一个节奏。
+    "@keyframes pr-stepnow{from{stroke-opacity:.5}to{stroke-opacity:.15}}",
+    ".is-working .pr-step-now{animation:pr-stepnow 1.4s ease-in-out var(--at) infinite alternate}",
     ".k-decide .pr-stripes,.k-done .pr-stripes{display:none}",
     "@media (prefers-reduced-motion:reduce){.pr-row *{animation:none !important}}",
     "</style>",
