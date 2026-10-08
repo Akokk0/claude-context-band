@@ -201,7 +201,8 @@ async function sessionAfter(
   wire.stop = null;
   wire.after = undefined;
   on("session.end", async (_, e) => ({ sessionId: e.sessionId }));
-  on("agent.spawn", async () => ({ model: "m", agentId: spawned.id }));
+  spawned.model = "m";
+  on("agent.spawn", async () => ({ model: spawned.model, agentId: spawned.id }));
   on("prompt.submit", async (_, e) => ({ text: e.text }));
   reads.onRead = () => {};
   compacted.done = false;
@@ -246,15 +247,18 @@ async function sessionAfter(
   };
 }
 
-/** 下一个派出去的子代理叫什么。 */
-const spawned = { id: "agent-1" };
+/** 下一个派出去的子代理叫什么、宿主说它跑在哪个模型上。 */
+const spawned = { id: "agent-1", model: "m" };
 
 /** 主人发了一句话:一轮开始。 */
 const begin = ($: Engine) => $.turn.start({ text: "go", turnId: "t" });
 
 /** 这一轮里的一次模型请求,从发出到整个回应收完。 */
-async function step($: Engine, input: Partial<typeof STEP> & { agentId?: string } = {}) {
-  const stream = $.turn.step({ ...STEP, ...input });
+async function step(
+  $: Engine,
+  input: Partial<typeof STEP> & { agentId?: string; effort?: string | number } = {},
+) {
+  const stream = $.turn.step({ ...STEP, ...input } as never);
   for await (const _ of stream) {
     // 测试不看流里的片段。
   }
@@ -1196,7 +1200,7 @@ test("a subagent gets a row of its own above the reported rows, counting its mod
   await report($, { done: 3 });
   await spawn($);
   expect(await titlesOn($)).toEqual(["勘察 ⑳", "切片 ⑳ · 图库合并"]);
-  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,0 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,0 个工具轮,m");
 
   clock.now = NOW + 3 * 60_000;
   use(90_000);
@@ -1204,7 +1208,7 @@ test("a subagent gets a row of its own above the reported rows, counting its mod
   await step($, { agentId: "agent-1" });
 
   const [agent, , gauges] = await stackOn($);
-  expect(agent.alt).toBe("勘察 ⑳:子代理在跑,2 个工具轮");
+  expect(agent.alt).toBe("勘察 ⑳:子代理在跑,2 个工具轮,m");
   // 主循环闲着,它自己照样动。
   expect(agent.source).toContain('class="pr-row k-agent is-working"');
   expect(agent.source).toContain(">3 分<");
@@ -1212,12 +1216,186 @@ test("a subagent gets a row of its own above the reported rows, counting its mod
   expect(gauges.alt).toBe("晴朗:上下文 18%,36.4k / 200k");
 });
 
+/** 子代理那一行右端的小胶囊:里面写的模型名,和小仪表的指针指到哪(没有仪表就是 undefined)。 */
+const metaOn = async ($: Engine) => {
+  const { source } = (await stackOn($))[0];
+  return {
+    model: /class="ag-model"[^>]*>([^<]*)</.exec(source)?.[1],
+    needle: /class="ag-needle" d="M603 18\.5 L(\S+ \S+)"/.exec(source)?.[1],
+    lit: /class="ag-lit" d="M595 18\.5 A8 8 0 0 1 (\S+ \S+)"/.exec(source)?.[1],
+  };
+};
+
+test("a subagent's row names the model it runs on from the moment it is sent out, and how hard it thinks once its first request has gone", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-sonnet-5-5";
+  await spawn($);
+
+  // 刚派出去:宿主已经说了它跑在哪个模型上;思考强度要等它发出第一次请求才知道,这时没有仪表。
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,0 个工具轮,sonnet");
+  expect(await metaOn($)).toEqual({ model: "sonnet", needle: undefined, lit: undefined });
+
+  await step($, { agentId: "agent-1", model: "claude-sonnet-5-5", effort: "high" });
+
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,1 个工具轮,sonnet · high");
+  // high 是五档里的第三档:指针正中朝上,亮着的弧走到半圆的顶。
+  expect(await metaOn($)).toEqual({ model: "sonnet", needle: "603 12.5", lit: "603 10.5" });
+});
+
+test("the needle of the little gauge sweeps from the left for low to the right for max, one fifth of the half circle per level", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await spawn($);
+  const swept: Record<string, unknown> = {};
+  for (const effort of ["low", "medium", "high", "xhigh", "max"]) {
+    await step($, { agentId: "agent-1", effort });
+    swept[effort] = (await metaOn($)).needle;
+  }
+  expect(swept).toEqual({
+    low: "597.3 16.6",
+    medium: "599.5 13.6",
+    high: "603 12.5",
+    xhigh: "606.5 13.6",
+    max: "608.7 16.6",
+  });
+  expect((await metaOn($)).lit).toBe("610.6 16");
+});
+
+test("the model on a subagent's row is the short family name; one the mod does not know is shown as it is, cut short", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  const named: string[] = [];
+  for (const model of [
+    "claude-opus-5-5",
+    "haiku",
+    "claude-fable-5-1",
+    "Claude-Opus-5-5",
+    "us.anthropic.claude-sonnet-5-5-v1:0",
+    "some-other-model-2026",
+  ]) {
+    spawned.model = model;
+    await spawn($);
+    named.push(String((await metaOn($)).model));
+  }
+  expect(named).toEqual(["opus", "haiku", "fable", "opus", "sonnet", "some-othe…"]);
+});
+
+test("the model and effort of a subagent follow what its requests actually name: a request on another model or at another effort moves the row", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-sonnet-5-5";
+  await spawn($);
+  await step($, { agentId: "agent-1", model: "claude-sonnet-5-5", effort: "high" });
+
+  // 宿主中途换了模型(比如落到备用的),强度也跟着这一次请求走。
+  await step($, { agentId: "agent-1", model: "claude-haiku-5-5", effort: "low" });
+
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,2 个工具轮,haiku · low");
+});
+
+test("a subagent whose requests carry no effort level, or a bare token budget, gets no gauge: only its model", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-haiku-5-5";
+  await spawn($);
+  await step($, { agentId: "agent-1", model: "claude-haiku-5-5", effort: "high" });
+
+  // 这一次请求不带强度(这个模型不吃这个设置):上一次的不留着。
+  await step($, { agentId: "agent-1", model: "claude-haiku-5-5" });
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,2 个工具轮,haiku");
+  expect((await metaOn($)).needle).toBeUndefined();
+
+  await step($, { agentId: "agent-1", model: "claude-haiku-5-5", effort: 4096 });
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,3 个工具轮,haiku");
+  expect((await metaOn($)).needle).toBeUndefined();
+});
+
+test("a subagent first seen through one of its requests still gets its model and effort", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+
+  await step($, { agentId: "agent-9", model: "claude-opus-5-5", effort: "xhigh" });
+
+  expect((await stackOn($))[0].alt).toBe("子代理:子代理在跑,1 个工具轮,opus · xhigh");
+});
+
+test("the model and effort stay on the row of a subagent that has finished, in the colour of a finished row", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-opus-5-5";
+  await spawn($);
+  await step($, { agentId: "agent-1", model: "claude-opus-5-5", effort: "xhigh" });
+  const running = (await stackOn($))[0].source;
+  await $.turn.complete({ ...TURN, agentId: "agent-1" } as never);
+
+  const [row] = await stackOn($);
+  expect(row.alt).toBe("勘察 ⑳:子代理做完了,1 个工具轮,opus · xhigh");
+  expect(await metaOn($)).toEqual({ model: "opus", needle: "606.5 13.6", lit: "607.7 12" });
+  expect(running).toContain(
+    'class="ag-model" x="590" y="17.4" text-anchor="end" font-size="10" font-weight="700" fill="#4b3fc4"',
+  );
+  expect(row.source).toContain(
+    'class="ag-model" x="590" y="17.4" text-anchor="end" font-size="10" font-weight="700" fill="#1f6b4c"',
+  );
+});
+
+test("the capsule hugs what is in it: wide enough for the model's name, and narrower when there is no gauge beside it", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  const capsule = async () =>
+    /class="ag-cap" x="(\S+)" y="7" width="(\S+)" height="14"/
+      .exec((await stackOn($))[0].source)
+      ?.slice(1)
+      .map(Number);
+  spawned.model = "claude-sonnet-5-5";
+  await spawn($);
+  // 没有仪表:名字靠着胶囊的右头。「sonnet」六个字母约 35 宽,两头各留 7。
+  expect(await capsule()).toEqual([568, 49]);
+  expect((await stackOn($))[0].source).toContain('class="ag-model" x="610"');
+
+  await step($, { agentId: "agent-1", model: "claude-sonnet-5-5", effort: "high" });
+  // 有仪表:名字让到仪表左边,胶囊往左长出仪表那一截。
+  expect(await capsule()).toEqual([548, 69]);
+
+  // 名字短一个字母,胶囊跟着窄 6。
+  await step($, { agentId: "agent-1", model: "claude-haiku-5-5" });
+  expect(await capsule()).toEqual([574, 43]);
+});
+
+test("a subagent the host names no model for gets no capsule at all", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "";
+  await spawn($);
+
+  const [row] = await stackOn($);
+  expect(row.alt).toBe("勘察 ⑳:子代理在跑,0 个工具轮");
+  expect(row.source).not.toContain("ag-cap");
+});
+
+test("a subagent sent back to work under the same id keeps its effort on the row and takes the model the host names this time", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-sonnet-5-5";
+  await spawn($);
+  await step($, { agentId: "agent-1", model: "claude-sonnet-5-5", effort: "high" });
+
+  spawned.model = "claude-opus-5-5";
+  await spawn($);
+
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,1 个工具轮,opus · high");
+});
+
+test("in the terminal a subagent's line carries its model and effort too", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  spawned.model = "claude-sonnet-5-5";
+  await spawn($);
+  await step($, { agentId: "agent-1", model: "claude-sonnet-5-5", effort: "high" });
+
+  const ui = await $.ui.mount({ ...BAND, surface: "terminal" });
+  expect(
+    await ui.find({ type: "Text", text: /勘察 ⑳ {2}子代理在跑 {2}1 个工具轮 {2}sonnet · high/ }),
+  ).toBeDefined();
+  await ui.unmount();
+});
+
 test("a finished subagent shows as done through the turn that hears of it and is gone when that turn ends", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await spawn($);
   await step($, { agentId: "agent-1" });
   await $.turn.complete({ ...TURN, agentId: "agent-1" } as never);
-  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理做完了,1 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理做完了,1 个工具轮,m");
   expect((await stackOn($))[0].source).toContain('class="pr-row k-agent"');
 
   // 它的回报开出来的那一轮:还在。
@@ -1244,10 +1422,10 @@ test("a subagent that was interrupted shows as stopped, and one sent back to wor
     isAborted: true,
     reason: "aborted",
   } as never);
-  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理停了,0 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理停了,0 个工具轮,m");
 
   await step($, { agentId: "agent-1", turnId: "t2" });
-  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,1 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理在跑,1 个工具轮,m");
 });
 
 test("the last request of a subagent landing after its turn has ended does not bring the row back to running", async ($, on) => {
@@ -1256,7 +1434,7 @@ test("the last request of a subagent landing after its turn has ended does not b
   await spawn($);
   await $.turn.complete({ ...TURN, agentId: "agent-1" } as never);
   await step($, { agentId: "agent-1" });
-  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理做完了,1 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("勘察 ⑳:子代理做完了,1 个工具轮,m");
 
   await begin($);
   expect(await titlesOn($)).toEqual(["勘察 ⑳"]);
@@ -1268,7 +1446,7 @@ test("requests from a subagent nobody saw start (spawned before a reload) still 
   await sessionAfter($, on, [36_400]);
   await step($, { agentId: "agent-9" });
 
-  expect((await stackOn($))[0].alt).toBe("子代理:子代理在跑,1 个工具轮");
+  expect((await stackOn($))[0].alt).toBe("子代理:子代理在跑,1 个工具轮,m");
 });
 
 test("two subagents each keep their own row, the later one on top", async ($, on) => {

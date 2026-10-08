@@ -49,6 +49,10 @@ export type Agent = {
   at: number;
   ended?: "done" | "stopped";
   endedTurn?: string;
+  /** 它跑在哪个模型上:宿主说的那个 id 或别名,原样记着。 */
+  model?: string;
+  /** 它最近一次请求要模型想得多用力:五档里的一档,或一个预算数;那次请求不带就没有。 */
+  effort?: string | number;
 };
 
 /**

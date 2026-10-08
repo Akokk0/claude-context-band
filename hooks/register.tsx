@@ -257,7 +257,7 @@ export const register: Register = (on) => {
       const at = await $.clock.now();
       await change($, (shown) => ({
         ...shown,
-        agents: withSpawn(shown.agents ?? [], id, e.description, at),
+        agents: withSpawn(shown.agents ?? [], id, e.description, at, result.model),
       }));
     }
     return result;
@@ -342,7 +342,10 @@ export const register: Register = (on) => {
       const at = await $.clock.now();
       await change($, (shown) => ({
         ...shown,
-        agents: withAgentStep(shown.agents ?? [], agentId, e.turnId, at),
+        agents: withAgentStep(shown.agents ?? [], agentId, e.turnId, at, {
+          model: e.model,
+          effort: e.effort,
+        }),
       }));
       return result;
     }

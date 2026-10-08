@@ -314,12 +314,21 @@ export function withSpawn(
   id: string,
   title: string,
   at: number,
+  model?: string,
 ): Agent[] {
   const old = agents.find((agent) => agent.id === id);
   if (old)
     return agents.map((agent) =>
       agent === old
-        ? { id, title: title || old.title, steps: old.steps, since: old.since, at }
+        ? {
+            id,
+            title: title || old.title,
+            steps: old.steps,
+            since: old.since,
+            at,
+            model,
+            effort: old.effort,
+          }
         : agent,
     );
   const kept =
@@ -328,7 +337,7 @@ export function withSpawn(
       : agents;
   return [
     ...agents.filter((agent) => kept.includes(agent)),
-    { id, title: title || "子代理", steps: 0, since: at, at },
+    { id, title: title || "子代理", steps: 0, since: at, at, model },
   ];
 }
 
@@ -342,14 +351,26 @@ export function withAgentStep(
   id: string,
   turnId: string,
   at: number,
+  asked: Pick<Agent, "model" | "effort">,
 ): Agent[] {
   const known = agents.some((agent) => agent.id === id)
     ? (agents as Agent[])
     : withSpawn(agents, id, "", at);
   return known.map((agent) => {
     if (agent.id !== id) return agent;
-    if (agent.ended && agent.endedTurn === turnId) return { ...agent, steps: agent.steps + 1 };
-    return { id, title: agent.title, steps: agent.steps + 1, since: agent.since, at };
+    // 模型和强度跟着这一次请求走:宿主中途可能换模型(落到备用的),强度是每次请求各带各的。
+    const { model, effort } = asked;
+    if (agent.ended && agent.endedTurn === turnId)
+      return { ...agent, steps: agent.steps + 1, model, effort };
+    return {
+      id,
+      title: agent.title,
+      steps: agent.steps + 1,
+      since: agent.since,
+      at,
+      model,
+      effort,
+    };
   });
 }
 
@@ -369,6 +390,8 @@ export function withAgentEnd(
           steps: agent.steps,
           since: agent.since,
           at,
+          model: agent.model,
+          effort: agent.effort,
           ended,
           endedTurn: turnId,
         }
@@ -400,23 +423,97 @@ export function shownAgents(agents: readonly Agent[]): Agent[] {
 const agentWord = (agent: Agent) =>
   agent.ended === "done" ? "子代理做完了" : agent.ended === "stopped" ? "子代理停了" : "子代理在跑";
 
+/** 行上认得的几个模型家族:宿主给的是完整的 id(`claude-sonnet-5-5`)或别名(`sonnet`),行上只写家族名。 */
+const FAMILIES = ["haiku", "sonnet", "opus", "fable"];
+const MODEL_CHARS = 10;
+
+/** 模型在行上叫什么:认得的写家族名,不认得的原样写、太长就截。没有就是空的。 */
+export function modelWord(model: string | undefined): string {
+  if (!model) return "";
+  const family = FAMILIES.find((name) => model.toLowerCase().includes(name));
+  if (family) return family;
+  return [...model].length > MODEL_CHARS
+    ? `${[...model].slice(0, MODEL_CHARS - 1).join("")}…`
+    : model;
+}
+
+/** 思考强度的五档,从轻到重。 */
+const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/** 强度是五档里的第几档(从 1 起);不是这五档之一(没带、给的是预算数)就是 0。 */
+export const effortLevel = (effort: Agent["effort"]) => EFFORTS.indexOf(String(effort)) + 1;
+
+/** 模型和强度写成一句:「sonnet · high」;强度说不出是哪一档就只有模型,都没有就是空的。 */
+function metaWord(agent: Agent): string {
+  const level = effortLevel(agent.effort);
+  return [modelWord(agent.model), level ? EFFORTS[level - 1] : ""].filter(Boolean).join(" · ");
+}
+
 export function agentAlt(agent: Agent): string {
-  return `${agent.title}:${agentWord(agent)},${agent.steps} 个工具轮`;
+  const meta = metaWord(agent);
+  return `${agent.title}:${agentWord(agent)},${agent.steps} 个工具轮${meta ? `,${meta}` : ""}`;
 }
 
 export function agentLine(agent: Agent): { mark: string; color: string; text: string } {
   return {
     mark: agent.ended === "done" ? "✓" : agent.ended ? "×" : "◆",
     color: agent.ended === "done" ? "green" : agent.ended ? "gray" : "cyan",
-    text: `${agent.title}  ${agentWord(agent)}  ${agent.steps} 个工具轮`,
+    text: [`${agent.title}  ${agentWord(agent)}  ${agent.steps} 个工具轮`, metaWord(agent)]
+      .filter(Boolean)
+      .join("  "),
   };
 }
 
 const AGENT_LOOKS = {
-  running: { from: "#a29bfe", to: "#6c5ce7", ink: "#fff" },
-  done: { from: "#a8e6cf", to: "#88d8b0", ink: "#18191C" },
-  stopped: { from: "#b2bec3", to: "#636e72", ink: "#fff" },
+  running: { from: "#a29bfe", to: "#6c5ce7", ink: "#fff", deep: "#4b3fc4" },
+  done: { from: "#a8e6cf", to: "#88d8b0", ink: "#18191C", deep: "#1f6b4c" },
+  stopped: { from: "#b2bec3", to: "#636e72", ink: "#fff", deep: "#4a5357" },
 };
+
+/** 仪表上的点记到十分之一像素:这么小的东西再细也看不出来。 */
+const tenth = (value: number) => String(Number(value.toFixed(1)));
+
+/** 轨道右端那颗小胶囊:右头在哪、多高;里面小仪表的圆心、半径、指针多长;名字两头各留多少。 */
+const META_END = 617;
+const META_Y = 7;
+const META_H = 14;
+const META_PAD = 7;
+const DIAL_X = 603;
+const DIAL_Y = 18.5;
+const DIAL_R = 8;
+const NEEDLE = 6;
+/** 有仪表时名字的右头;没有仪表时名字靠着胶囊的右头。 */
+const MODEL_END = 590;
+
+/**
+ * 子代理行右端的小胶囊:它跑在哪个模型上,和一只小仪表 —— 半圆表盘,指针从左(low)摆到右(max),
+ * 五档各占半圆的五分之一、指在那一份的正中。和底下那排仪表是一家(主人 10-08 从七种画法里挑的)。
+ * 强度说不出是哪一档时不画仪表,只有名字;连模型都不知道就什么都不画。
+ */
+function agentMeta(agent: Agent, deep: string): string {
+  const word = modelWord(agent.model);
+  if (!word) return "";
+  const level = effortLevel(agent.effort);
+  const end = level ? MODEL_END : META_END - META_PAD;
+  const x = Math.round(end - META_PAD - [...word].length * 5.8);
+  const parts = [
+    `<rect class="ag-cap" x="${x}" y="${META_Y}" width="${META_END - x}" height="${META_H}" rx="${META_H / 2}" fill="#fff" fill-opacity="0.92"/>`,
+    `<text class="ag-model" x="${end}" y="17.4" text-anchor="end" font-size="10" font-weight="700" fill="${deep}">${escape(word)}</text>`,
+  ];
+  if (level) {
+    const angle = Math.PI * (1 - (level - 0.5) / EFFORTS.length);
+    const at = (radius: number) =>
+      `${tenth(DIAL_X + radius * Math.cos(angle))} ${tenth(DIAL_Y - radius * Math.sin(angle))}`;
+    const from = `M${DIAL_X - DIAL_R} ${DIAL_Y} A${DIAL_R} ${DIAL_R} 0 0 1`;
+    parts.push(
+      `<path d="${from} ${DIAL_X + DIAL_R} ${DIAL_Y}" fill="none" stroke="${deep}" stroke-opacity="0.22" stroke-width="2.4" stroke-linecap="round"/>`,
+      `<path class="ag-lit" d="${from} ${at(DIAL_R)}" fill="none" stroke="${deep}" stroke-width="2.4" stroke-linecap="round"/>`,
+      `<path class="ag-needle" d="M${DIAL_X} ${DIAL_Y} L${at(NEEDLE)}" stroke="${deep}" stroke-width="1.6" stroke-linecap="round"/>`,
+      `<circle cx="${DIAL_X}" cy="${DIAL_Y}" r="1.6" fill="${deep}"/>`,
+    );
+  }
+  return parts.join("");
+}
 
 /**
  * 子代理的行:它没有「一共几步」,所以轨道不走格子 —— 在跑的时候整条铺淡底加流动的斜纹,胶囊里是它跑了几趟(发了几次模型请求),
@@ -470,6 +567,7 @@ export function agentSvg(agent: Agent, options: { now: number }): string {
     `<g transform="translate(${TRACK_X} ${TRACK_Y})"><rect width="${pillW}" height="${TRACK_H}" rx="${TRACK_H / 2}" fill="${look.to}"/>`,
     `<text x="${pillW / 2}" y="13" text-anchor="middle" font-size="11" font-weight="700" fill="${look.ink}">${label}</text></g>`,
     "</g>",
+    agentMeta(agent, look.deep),
     `<text class="pr-ink" x="${WIDTH}" y="18.5" text-anchor="end" font-size="13" font-weight="700" fill="#18191C">${minutes < 1 ? "刚开始" : `${minutes} 分`}</text>`,
     "</g></svg>",
   ].join("");
