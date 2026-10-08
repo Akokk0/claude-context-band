@@ -85,7 +85,8 @@ const billOf = (input: number, output: number): Bill => ({
 });
 
 /**
- * 宿主那一半里跨进程的东西:盘(`$.store` 写到这儿,进程重启也留着)和会话 id(续上的还是同一个)。
+ * 宿主那一半里跨进程的东西:盘(`$.store` 写到这儿,进程重启也留着)、会话 id,和这场对话头一回开始的时刻 `born`。
+ * 续上时会话 id 多半还是同一个;被打断后再续上的,宿主会给它换一个新的,`born` 不变。
  * `isStateLost`:进程重启过,宿主替会话存着的状态没了。`isDiskDown`:盘读写不了。`isDiskUnreadable`:盘只是读不了,写还行。
  * `writes`:往盘上写(含删)过几回。
  * `onWrite`:每次往盘上写之前叫一声,测试用它让某一次写慢下来。
@@ -93,6 +94,7 @@ const billOf = (input: number, output: number): Bill => ({
 const host = {
   disk: new Map<string, unknown>(),
   session: "s-1",
+  born: 0 as number | undefined,
   isStateLost: false,
   isDiskDown: false,
   isDiskUnreadable: false,
@@ -117,7 +119,7 @@ const LIMITS: Limit[] = [
 
 /** 引擎那一层的 `$.session.usage()`:窗口 200k,用了 `tokens`。 */
 const usageOf = (tokens: number, rateLimits: readonly Limit[]) => ({
-  startedAt: 0,
+  startedAt: host.born,
   // 负数:宿主还不知道窗口用了多少(这个窗口里还没有回应报过),只知道窗口多大。
   context:
     tokens < 0
@@ -141,6 +143,7 @@ async function sessionAfter(
   on("session.start", async (_, e) => ({ cwd: e.cwd }));
   host.disk.clear();
   host.session = "s-1";
+  host.born = 0;
   host.isStateLost = false;
   host.isDiskDown = false;
   host.isDiskUnreadable = false;
@@ -223,7 +226,7 @@ async function sessionAfter(
     return {
       value:
         wire.silent || wire.quietAfter < 0
-          ? { startedAt: 0, context: {}, rateLimits }
+          ? { startedAt: host.born, context: {}, rateLimits }
           : usageOf(used, rateLimits),
     };
   });
@@ -2198,13 +2201,156 @@ test("each session keeps its own rows: another session picked up in between sees
   await report($, { plan: "总", title: "总进度", done: 1 });
 
   host.session = "s-2";
+  host.born = DAY;
   await restart($);
   expect(await titlesOn($)).toEqual([]);
   await report($, { plan: "别", title: "别的活", done: 2 });
 
   host.session = "s-1";
+  host.born = 0;
   await restart($);
   expect(await titlesOn($)).toEqual(["总进度"]);
+});
+
+/** 被打断后再续上:宿主给这场对话换了一个会话 id,它头一回开始的时刻没变。 */
+const resumeAs = async ($: Engine, session: string) => {
+  host.session = session;
+  await restart($);
+};
+
+test("work reported before the conversation is picked up under a new session id is back on the band", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  await report($, { plan: "片", title: "这一片", done: 3, status: "decide" });
+
+  await resumeAs($, "s-2");
+
+  expect(await rowsOn($)).toEqual([
+    "这一片:等你拍板,施工 1.1/3,33%",
+    "总进度:勘察阶段,勘察 0.1/3,11%",
+  ]);
+});
+
+test("rows picked up under a new session id move to it: the old id leaves nothing behind to come back later", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  await resumeAs($, "s-2");
+  expect([...host.disk.keys()]).toEqual(["rows:s-2"]);
+
+  // 新 id 下把活撤了,再被换一次 id:旧 id 那份要是还在,撤掉的行就又回来了。
+  await report($, { plan: "总", title: "总进度", done: 1, remove: true });
+  await resumeAs($, "s-3");
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("reports that arrive together right after the session id changed all land on top of the rows picked up", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 换了 id、会话还没重新开始,两件活就同时报了进来:两边都要先把从前的行接回来。
+  // 各接各的话,后接的那一个会拿接回来的旧行再落一次盘,盖掉先报的那件。
+  host.session = "s-2";
+  host.isStateLost = true;
+  await Promise.all(["期", "片"].map((plan) => report($, { plan, title: `活 ${plan}`, done: 1 })));
+  expect([...host.disk.keys()]).toEqual(["rows:s-2"]);
+
+  await restart($);
+
+  expect((await titlesOn($)).sort()).toEqual(["总进度", "活 期", "活 片"].sort());
+});
+
+/** 盘上某个会话 id 底下那份行的标题。 */
+const keptUnder = (session: string) =>
+  (host.disk.get(`rows:${session}`) as { rows: { title: string }[] } | undefined)?.rows.map(
+    (row) => row.title,
+  );
+
+test("rows picked up under a new session id are on the disk under it at once, before anything else changes them", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 换了 id 之后头一件事是主人发话:这一下不改行,但旧 id 那份已经删了,新 id 底下得有。
+  host.session = "s-2";
+  host.isStateLost = true;
+  await $.prompt.submit({ text: "继续" } as never);
+
+  expect([...host.disk.keys()]).toEqual(["rows:s-2"]);
+  expect(keptUnder("s-2")).toEqual(["总进度"]);
+});
+
+test("what moves to the new session id is the rows as they stand, not the copy read off the disk a moment before", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 换了 id 之后主人发话和一件新活同时到:发话那边读盘读到一半卡住,新活先接回了行、添了自己那行、落了盘。
+  // 发话那边放行后要是拿它早先读到的旧行去落盘,新活那一行就被盖掉了。
+  host.session = "s-2";
+  host.isStateLost = true;
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let isFirst = true;
+  reads.onRead = () => {
+    if (!isFirst) return;
+    isFirst = false;
+    return gate;
+  };
+  const said = $.prompt.submit({ text: "继续" } as never);
+  await report($, { plan: "片", title: "这一片", done: 1 });
+  release();
+  await said;
+
+  expect(keptUnder("s-2")).toEqual(["总进度", "这一片"]);
+});
+
+test("a conversation picked up under a new session id takes the rows of its own past, not another conversation's", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  host.disk.set("rows:other", { born: DAY, rows: [{ ...SAVED, at: NOW }] });
+  host.disk.set("rows:old", [{ ...SAVED, at: NOW }]);
+
+  await resumeAs($, "s-2");
+
+  expect(await titlesOn($)).toEqual(["总进度"]);
+  expect([...host.disk.keys()].sort()).toEqual(["rows:old", "rows:other", "rows:s-2"]);
+});
+
+test("of several pasts left on the disk by one conversation, the one reported last is picked up", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  host.disk.set("rows:a", { born: 0, rows: [{ ...SAVED, title: "早的", at: NOW - 2 * DAY }] });
+  host.disk.set("rows:b", { born: 0, rows: [{ ...SAVED, title: "晚的", at: NOW - DAY }] });
+  host.disk.set("rows:c", { born: 0, rows: [{ ...SAVED, title: "更早的", at: NOW - 3 * DAY }] });
+
+  await resumeAs($, "s-2");
+
+  expect(await titlesOn($)).toEqual(["晚的"]);
+});
+
+test("a session that already has rows of its own under its id keeps them and takes no one else's", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  host.disk.set("rows:twin", { born: 0, rows: [{ ...SAVED, title: "孪生的", at: NOW + DAY }] });
+
+  await restart($);
+
+  expect(await titlesOn($)).toEqual(["总进度"]);
+  expect(host.disk.has("rows:twin")).toBe(true);
+});
+
+test("rows are still kept and picked up under the same id when the host cannot say when the conversation began", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  host.born = undefined;
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  host.disk.set("rows:other", { rows: [{ ...SAVED, at: NOW }] });
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["总进度"]);
+
+  // 说不出自己是哪一场,就认不了从前的自己:换了 id 之后不拿别人的。
+  await resumeAs($, "s-2");
+  expect(await titlesOn($)).toEqual([]);
 });
 
 test("a report that arrives after a restart before the session has started again adds to the rows on the disk", async ($, on) => {

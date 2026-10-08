@@ -259,9 +259,11 @@ export function keptOf(rows: readonly Row[]): Omit<Row, "was">[] {
  * 条和胶囊直接落在做到的地方,不从头滑一遍。
  */
 export function rowsFrom(saved: unknown): Row[] {
-  if (!Array.isArray(saved)) return [];
+  // 0.2.1 及之前盘上直接是那一列行;之后外面多包了一层,带着这场对话是哪一场(见 bornOf)。
+  const list = Array.isArray(saved) ? saved : (saved as { rows?: unknown } | null)?.rows;
+  if (!Array.isArray(list)) return [];
   const rows: Row[] = [];
-  for (const item of saved as unknown[]) {
+  for (const item of list as unknown[]) {
     if (typeof item !== "object" || item === null) continue;
     const row = rowOf(item as Record<string, unknown>);
     const { at } = item as { at?: unknown };
@@ -270,6 +272,19 @@ export function rowsFrom(saved: unknown): Row[] {
   }
   return rows.slice(-KEPT);
 }
+
+/**
+ * 盘上那一份是哪一场对话留下的:那场对话头一回开始的时刻。读不出来(以前的版本写的、宿主当时说不出)就是不知道。
+ * 会话 id 认不了这个 —— 一场对话被打断后再续上,宿主会给它换一个新 id(真机上量的),开始的时刻不变。
+ */
+export function bornOf(saved: unknown): number | undefined {
+  const born = (saved as { born?: unknown } | null)?.born;
+  return typeof born === "number" ? born : undefined;
+}
+
+/** 一份行最后一次有人报是什么时候;一行都没有就是负无穷。 */
+export const lastReportOf = (rows: readonly Row[]) =>
+  rows.reduce((last, row) => Math.max(last, row.at), Number.NEGATIVE_INFINITY);
 
 /** 盘上一个会话的行是不是没人管了:一行都读不出来,或者每一行都太久没人报。 */
 export function isForgotten(rows: readonly Row[], now: number): boolean {

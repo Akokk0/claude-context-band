@@ -34,8 +34,10 @@ import {
   agentAlt,
   agentLine,
   agentSvg,
+  bornOf,
   isForgotten,
   keptOf,
+  lastReportOf,
   receiptOf,
   rowAlt,
   rowLine,
@@ -610,26 +612,62 @@ async function change($: EngineInterface, next: (shown: Card) => Card): Promise<
 /**
  * 进程刚起来(应用重启后续上会话):状态里还没有行,把盘上这个会话的行接回来。
  * 只看状态里有没有行,不在模块里记「接过了」:热加载会清模块变量,而那时状态里的行还在,不该再读盘。
+ * 自己的 id 底下什么都没有时,找这场对话从前留下的那份(见 inherited)。
  * 接回来之后顺手把别的会话留在盘上、没人管了的行清掉:进程起来时清一回就够。
  */
 async function restore($: EngineInterface): Promise<void> {
   if ((await read($, card)).rows !== undefined) return;
   try {
     const mine = keyOf(await $.session.id());
-    const rows = rowsFrom(await $.store.get(mine));
-    await update($, card, (shown) => (shown.rows === undefined ? { ...shown, rows } : shown));
-    const now = await $.clock.now();
-    for (const key of await $.store.keys()) {
-      if (
-        key !== mine &&
-        key.startsWith(ROWS) &&
-        isForgotten(rowsFrom(await $.store.get(key)), now)
-      )
-        await $.store.delete(key);
+    const own = rowsFrom(await $.store.get(mine));
+    const others = new Map<string, unknown>();
+    for (const key of await $.store.keys())
+      if (key !== mine && key.startsWith(ROWS)) others.set(key, await $.store.get(key));
+    const past = own.length === 0 ? inherited(others, await born($)) : undefined;
+    const rows = past ? rowsFrom(others.get(past)) : own;
+    const written = await update($, card, (shown) =>
+      shown.rows === undefined ? { ...shown, rows } : shown,
+    );
+    if (past) {
+      // 搬到自己的 id 底下,旧的那份删掉:留着的话,这边把行撤光之后再被换一次 id,撤掉的行又会从它那儿回来。
+      // 落的是状态里此刻的行,不是刚读出来的那份:同时到的另一件活可能已经先接回来、还添了行。
+      await keep($, written.rows ?? rows);
+      await $.store.delete(past);
     }
+    const now = await $.clock.now();
+    for (const [key, saved] of others)
+      if (isForgotten(rowsFrom(saved), now)) await $.store.delete(key);
   } catch {
     // 盘读不了:行先空着,下一次写之前再试;清到一半断了的,下回进程起来接着清。
   }
+}
+
+/** 这场对话头一回开始的时刻;宿主说不出来就是不知道。续上的对话报的还是头一回那个时刻。 */
+async function born($: EngineInterface): Promise<number | undefined> {
+  try {
+    return bornOf({ born: (await $.session.usage()).startedAt });
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * 这场对话从前在别的会话 id 底下留的那份行,是盘上的哪个键。
+ * 被打断后再续上、关掉应用再开,宿主都可能给对话换一个新 id(真机上一场对话三天换了三回),
+ * 按 id 找就扑空;同一场对话头一回开始的时刻不变,按它认。有好几份时拿最后有人报过的那份。
+ */
+function inherited(
+  others: ReadonlyMap<string, unknown>,
+  mine: number | undefined,
+): string | undefined {
+  if (mine === undefined) return undefined;
+  let found: { key: string; last: number } | undefined;
+  for (const [key, saved] of others) {
+    if (bornOf(saved) !== mine) continue;
+    const last = lastReportOf(rowsFrom(saved));
+    if (!found || last > found.last) found = { key, last };
+  }
+  return found?.key;
 }
 
 /** 缓存那一条等着的下一回重画,和它是第几回定的(后定的作数)。模块变量:热加载丢了就在会话开始时重新定。 */
@@ -674,7 +712,7 @@ function keep($: EngineInterface, rows: readonly Row[]): Promise<void> {
     try {
       const key = keyOf(await $.session.id());
       if (rows.length === 0) await $.store.delete(key);
-      else await $.store.set(key, keptOf(rows));
+      else await $.store.set(key, { born: await born($), rows: keptOf(rows) });
     } catch {
       // 盘上那份停在上一次写成的样子。
     }
