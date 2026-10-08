@@ -1,6 +1,6 @@
 {
   "name": "context-band",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "A band above the prompt: context-window weather, usage limits, prompt cache, progress rows and subagent rows",
   "author": {
     "name": "Akokko"
