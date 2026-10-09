@@ -3195,6 +3195,20 @@ test("the usage note tells the model to send a progress report in the same messa
   expect(JSON.stringify(host.tools)).toContain("同一条消息");
 });
 
+test("the usage note tells the model to report before it writes its answer, never after: a tool call at the end of a message costs one more round", async ($, on) => {
+  // 原先写的是「和收尾的动作或答复一起发」。照做的结果(主人在另一场会话里看到的):答复整段写完了,
+  // 末尾才调报进度,模型只好再跑一轮接工具的结果,人又等一轮,还多出一句没用的话。
+  on("prompt.context", async (_, e) => ({ blocks: [...e.blocks] }));
+  await sessionAfter($, on, [36_400]);
+
+  const { blocks } = await $.prompt.context({ blocks: [] } as never);
+  const note = blocks.find((block) => block.name === "contextBand")?.text ?? "";
+  expect(note).toContain("先报,再写答复");
+  expect(note).toContain("答复写完之后不要再调");
+  expect(note).not.toContain("或答复一起发");
+  expect(JSON.stringify(host.tools)).toContain("先报,再写答复");
+});
+
 test("the step in hand shows on the ring too: its piece is drawn paler than the finished ones and pulses while the turn runs", async ($, on) => {
   // 原先正在做的那一段和还没做的一样是灰的,环上看不出眼下走到哪一段(主人看出来的)。
   await sessionAfter($, on, [36_400]);
