@@ -2,7 +2,7 @@
 
 写法照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/),版本号照[语义化版本](https://semver.org/lang/zh-CN/)。1.0 之前,小版本号一动就可能带着不兼容的改动。
 
-## 未发布
+## 0.3.0 - 2026-10-09
 
 ### 新增
 
