@@ -2753,7 +2753,7 @@ test("the mod brings its own usage note into the conversation, after whatever th
   expect(blocks.slice(0, 2).map((block) => block.text)).toEqual(["x", "today"]);
 
   const note = blocks[2].text;
-  for (const piece of ["ToolSearch", "plan", '"decide"', "remove: true", "子代理"])
+  for (const piece of ["ToolSearch", "plan", "remove: true", "子代理"])
     expect(note).toContain(piece);
   // 大工程怎么报也在里面:装了 mod 就不用再往 CLAUDE.md 里写一个字(主人:要开箱即用)。
   for (const piece of [
@@ -3203,18 +3203,48 @@ test("the usage note tells the model to send a progress report in the same messa
   expect(JSON.stringify(host.tools)).toContain("同一条消息");
 });
 
-test("the usage note tells the model to report before it writes its answer, never after: a tool call at the end of a message costs one more round", async ($, on) => {
-  // 原先写的是「和收尾的动作或答复一起发」。照做的结果(主人在另一场会话里看到的):答复整段写完了,
-  // 末尾才调报进度,模型只好再跑一轮接工具的结果,人又等一轮,还多出一句没用的话。
+test("the usage note no longer asks for a report before the answer or a decide status: the band hands the turn over by itself", async ($, on) => {
+  // 原先要模型停下来问用户、整件做完时专门报一次 decide,还要「先报,再写答复」:单独占一轮的调用是白跑轮次的大头。
+  // 现在回合一结束,进度带自己把最上面没做完的那一条切成等你拍板。
   on("prompt.context", async (_, e) => ({ blocks: [...e.blocks] }));
   await sessionAfter($, on, [36_400]);
 
   const { blocks } = await $.prompt.context({ blocks: [] } as never);
   const note = blocks.find((block) => block.name === "contextBand")?.text ?? "";
-  expect(note).toContain("先报,再写答复");
-  expect(note).toContain("答复写完之后不要再调");
-  expect(note).not.toContain("或答复一起发");
-  expect(JSON.stringify(host.tools)).toContain("先报,再写答复");
+  for (const old of ["先报,再写答复", "答复写完之后不要再调", 'status: "decide"', "或答复一起发"]) {
+    expect(note).not.toContain(old);
+    expect(JSON.stringify(host.tools)).not.toContain(old);
+  }
+  for (const piece of ["收尾不用专门报", "回合结束时", "等你拍板", "还有子代理在跑时不切"])
+    expect(note).toContain(piece);
+  for (const piece of ["收尾不用专门报", "回合结束时", "等用户拍板"])
+    expect(JSON.stringify(host.tools)).toContain(piece);
+});
+
+test("with the desktop task list the usage note and the tool both say to report only the total and the phase, leaving the step in hand to the task list", async ($, on) => {
+  on("prompt.context", async (_, e) => ({ blocks: [...e.blocks] }));
+  await sessionAfter($, on, [36_400]);
+
+  const { blocks } = await $.prompt.context({ blocks: [] } as never);
+  const note = blocks.find((block) => block.name === "contextBand")?.text ?? "";
+  for (const where of [note, JSON.stringify(host.tools)]) {
+    expect(where).toContain("任务列表");
+    expect(where).toContain("总进度和当前大阶段");
+  }
+  for (const piece of [
+    "mcp__ccd_turn__update_plan",
+    "任务列表装不下的大进度",
+    "换片、换阶段时报",
+    "没有任务列表的会话里",
+  ])
+    expect(note).toContain(piece);
+  // 工具说明开头不把范围说窄(没有任务列表时普通的多步活也用它),一步指什么也写明。
+  expect(JSON.stringify(host.tools)).toContain("把一件多步的活做到哪了报给用户看");
+  expect(JSON.stringify(host.tools)).toContain("它们的一步就是一片、一个阶段");
+  expect(note).toContain("总和段这两条的「一步」就是一片、一个阶段");
+  // 工具的 status 说明改口径,老用法的取值还在。
+  expect(JSON.stringify(host.tools)).toContain("回合结束时进度带会自己切到等你拍板");
+  expect(JSON.stringify(host.tools)).toContain('"decide"');
 });
 
 test("the step in hand shows on the ring too: its piece is drawn paler than the finished ones and pulses while the turn runs", async ($, on) => {
