@@ -499,9 +499,13 @@ export const register: Register = (on) => {
       await draw($, measured, (before) => {
         const shown = cached(before);
         const { now, at } = measured;
-        const rows = settled(shown.rows ?? []);
-        const tasks = settledTasks(shown.tasks);
         const agents = withoutEndedAgents(shown.agents ?? []);
+        // 这一轮答完了:该用户说话了。没有子代理还在替它干活的话,把最上面没做完的那一条切成「等你拍板」。
+        const { rows, tasks } = handedOver(
+          settled(shown.rows ?? []),
+          settledTasks(shown.tasks),
+          agents.some((agent) => !agent.ended),
+        );
         // 没有读数:一种是没读到,一种是卡片上本来就没有、宿主也还说不出窗口用了多少。都只收尾,不记柱子。
         if (!now)
           return { ...shown, ...quotas(shown, measured), rows, tasks, agents, running: false };
@@ -649,6 +653,28 @@ function settled(rows: readonly Row[]): Row[] {
   return rows.every((row) => row.was === row.done)
     ? (rows as Row[])
     : rows.map((row) => ({ ...row, was: row.done }));
+}
+
+/**
+ * 回合结束,球到用户这边:带里最上面(最细)那条没做完的行切成「等你拍板」,更大的行不动。
+ * 任务列表排在最上面,它没做完就切它;否则从最后报的往前找第一条没做完的 progress 行。
+ * 还有子代理在跑就什么都不切。什么都不用切、或者已经是了,原样交回。
+ */
+function handedOver(
+  rows: Row[],
+  tasks: Card["tasks"],
+  isBusy: boolean,
+): { rows: Row[]; tasks: Card["tasks"] } {
+  if (isBusy) return { rows, tasks };
+  const row = taskRow(tasks);
+  if (tasks && row && statusOf(row) !== "done")
+    return { rows, tasks: tasks.asking ? tasks : { ...tasks, asking: true } };
+  const top = rows.findLastIndex((one) => statusOf(one) !== "done");
+  if (top < 0 || rows[top]?.status === "decide") return { rows, tasks };
+  return {
+    rows: rows.map((one, i) => (i === top ? { ...one, status: "decide" as const } : one)),
+    tasks,
+  };
 }
 
 /** 任务列表那一行「上一次画的完成数」拨到此刻;什么都不用拨时原样交回。 */

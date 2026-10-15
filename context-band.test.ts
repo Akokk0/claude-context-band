@@ -2313,7 +2313,8 @@ test("what comes back after a restart follows every way the rows change, not onl
 
 test("readings that move the gauges alone do not write to the disk", async ($, on) => {
   const use = await sessionAfter($, on, [36_400]);
-  await report($, { done: 3 });
+  // 行已经在等拍板:答完时不再切(切了是行本身变了,会落盘,那是另一回事)。
+  await report($, { done: 3, status: "decide" });
   const written = host.writes;
   expect(written).toBeGreaterThan(0);
 
@@ -3846,4 +3847,115 @@ test("a session with only a task list and no reported rows gets it back, and its
 
   expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
   expect([...host.disk.keys()].sort()).toEqual(["rows:recent", "rows:s-1"]);
+});
+
+// ---- 回合结束:进度带自己把最上面那一条没做完的行切成「等你拍板」 ----
+
+/** 带里每一行的状态那个词(从上到下,仪表不算):「工作中」「等你拍板」…… */
+const wordsOn = async ($: Engine) =>
+  (await rowsOn($)).map((alt) => alt.split(":")[1].split(",")[0]);
+
+test("when the main turn ends the work in hand turns to waiting for the user, and goes back to work when the user speaks", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(await rowsOn($)).toEqual(["切片 ⑳ · 图库合并:等你拍板,施工 1.1/3,33%"]);
+
+  await $.prompt.submit({ text: "继续" } as never);
+  expect(await rowsOn($)).toEqual(["切片 ⑳ · 图库合并:工作中,施工 1.1/3,33%"]);
+});
+
+test("of several reported rows only the top one, the finest, turns to waiting", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  for (const plan of ["总", "段", "件"]) {
+    await report($, { plan, title: `活 ${plan}`, done: 3 });
+  }
+  await $.turn.complete(TURN);
+
+  expect(await titlesOn($)).toEqual(["活 件", "活 段", "活 总"]);
+  expect(await wordsOn($)).toEqual(["等你拍板", "工作中", "工作中"]);
+});
+
+test("with a task list that is not finished, only the task list turns to waiting, not the reported rows", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await updatePlan($, { items: TASKS });
+  await $.turn.complete(TURN);
+
+  expect(await titlesOn($)).toEqual(["任务列表", "活 总"]);
+  expect(await wordsOn($)).toEqual(["等你拍板", "工作中"]);
+});
+
+test("a task list the end of the turn turned to waiting goes back to work when the user speaks", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await $.turn.complete(TURN);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+
+  await $.prompt.submit({ text: "继续" } as never);
+  expect(await rowsOn($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+});
+
+test("what the end of the turn turned to waiting is still waiting after the app restarts, for a reported row and for the task list", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(await rowsOn($)).toEqual(["活 总:等你拍板,施工 1.1/3,33%"]);
+  await restart($);
+  expect(await rowsOn($)).toEqual(["活 总:等你拍板,施工 1.1/3,33%"]);
+
+  // 用户回话:第一轮切出来的撤回,第二轮只有最上面的任务列表在等。
+  await $.prompt.submit({ text: "继续" } as never);
+  await updatePlan($, { items: TASKS });
+  await begin($);
+  await $.turn.complete(TURN);
+  await restart($);
+  expect(await rowsOn($)).toEqual([
+    "任务列表:等你拍板,列出 hooks/ 0/2,0%",
+    "活 总:工作中,施工 1.1/3,33%",
+  ]);
+});
+
+test("a subagent still running at the end of the main turn: nothing turns to waiting", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await updatePlan($, { items: TASKS });
+  await spawn($);
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["子代理在跑", "工作中", "工作中"]);
+});
+
+test("a finished row at the top is skipped: the first unfinished one below it is the one that turns", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await report($, { plan: "段", title: "活 段", done: 3 });
+  await report($, { plan: "件", title: "活 件", done: 9 });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["做完了", "等你拍板", "工作中"]);
+});
+
+test("the end of a subagent's own turn does not turn anything to waiting", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await $.turn.complete({ ...TURN, agentId: "agent-9" } as never);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a row the model already marked waiting is not written again when the turn ends", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3, status: "decide" });
+  const writes = host.writes;
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+  expect(host.writes).toBe(writes);
 });
