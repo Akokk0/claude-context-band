@@ -3265,6 +3265,7 @@ test("on a ring that is one arc the step in hand is the next twelfth after the l
 // ---- 任务列表:进度带照着桌面端的任务列表画一行 ----
 
 const UPDATE_PLAN = "mcp__ccd_turn__update_plan";
+const WRAP_UP = "mcp__ccd_turn__wrap_up";
 type PlanItem = { content: string; status: "pending" | "in_progress" | "completed" };
 const TASKS: PlanItem[] = [
   { content: "列出 hooks/ 目录文件", status: "in_progress" },
@@ -3284,6 +3285,11 @@ const planHost = (on: On) => {
   on(
     "tool.call",
     { tool: UPDATE_PLAN },
+    async () => (planned.answer ?? planResult(planned.text)) as never,
+  );
+  on(
+    "tool.call",
+    { tool: WRAP_UP },
     async () => (planned.answer ?? planResult(planned.text)) as never,
   );
 };
@@ -3560,3 +3566,182 @@ test("the task list sits above every reported row, however later reports arrive"
   await report($, { plan: "片", title: "活 片", done: 1 });
   expect(await titlesOn($)).toEqual(["任务列表", "活 片", "活 总"]);
 });
+
+// ---- 任务列表:每一轮的收尾 ----
+
+const NOTHING_PENDING =
+  "Nothing is pending, so the app draws no box; the recap is the session's status.";
+const IN_THE_BOX = "Shown in the next-step box. The box ends your turn.";
+/** 模型调一次 wrap_up;回的是 `$.tool.call` 交回给调用方的结果。 */
+const wrapUp = ($: Engine, input: Record<string, unknown>, text: string) => {
+  planned.text = text;
+  return $.tool.call({ tool: WRAP_UP, tool_use_id: "tu-2", recap: "做完了", ...input } as never);
+};
+const ASK = { ask: "要提交吗?", actions: [{ label: "提交", message: "提交吧" }], blocked: true };
+
+test("a wrap-up that asks something turns the task list into waiting for a decision, and the user's reply puts it back to work", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  const answer = await wrapUp($, ASK, IN_THE_BOX);
+  expect(answer).toEqual(planResult(IN_THE_BOX));
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual([
+    "任务列表:等你拍板,列出 hooks/ 0/2,0%",
+  ]);
+
+  await $.prompt.submit({ text: "提交吧" } as never);
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual([
+    "任务列表:工作中,列出 hooks/ 0/2,0%",
+  ]);
+});
+
+test("a finished list that is still waiting for the user's answer stays through a turn that starts without a prompt, and folds after the user speaks", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS.map((task) => ({ ...task, status: "completed" })) });
+  await wrapUp($, ASK, IN_THE_BOX);
+  // 后台的活回来也会开一轮:主人没说话,还在等。
+  await begin($);
+  // 全打了勾的行画出来是「做完了」(状态由步数推),但还在带里,没有收起。
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:做完了,完成 2/2,100%"]);
+
+  await $.prompt.submit({ text: "好" } as never);
+  await begin($);
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual([]);
+});
+
+test("asking again while already asking writes no state", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+  const writes = host.stateSets;
+  await wrapUp($, ASK, IN_THE_BOX);
+  expect(host.stateSets).toBe(writes);
+});
+
+test("an ask of only blanks counts as no ask: the whole list is ticked off", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, { ask: "  " }, NOTHING_PENDING);
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:做完了,完成 2/2,100%"]);
+});
+
+test("a state that cannot be written does not stop the wrap_up result going through", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  host.isStateDown = true;
+  expect(await wrapUp($, ASK, IN_THE_BOX)).toEqual(planResult(IN_THE_BOX));
+});
+
+test("one prompt puts both a reported row and the task list back to work", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3, status: "decide" });
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+  expect(await rowsOn($)).toEqual([
+    "任务列表:等你拍板,列出 hooks/ 0/2,0%",
+    "活 总:等你拍板,施工 1.1/3,33%",
+  ]);
+
+  await $.prompt.submit({ text: "好" } as never);
+  expect(await rowsOn($)).toEqual([
+    "任务列表:工作中,列出 hooks/ 0/2,0%",
+    "活 总:工作中,施工 1.1/3,33%",
+  ]);
+});
+
+test("a prompt that clears a waiting task list does not turn the rows into an empty list when the disk could not be read", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  // 重启后盘坏了:行接不回来,状态里的行还是「不知道」。
+  host.isDiskDown = true;
+  await restart($);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+  await $.prompt.submit({ text: "好" } as never);
+  expect(await rowsOn($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+
+  // 盘好了:盘上的行还能接回来,没有被一个空的盖住。
+  host.isDiskDown = false;
+  await report($, { plan: "段", title: "活 段", done: 3 });
+  expect(await titlesOn($)).toEqual(["任务列表", "活 段", "活 总"]);
+});
+
+test("a wrap-up with nothing to ask ticks off the whole list, and the row folds away when the next turn starts", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  const answer = await wrapUp($, {}, NOTHING_PENDING);
+  expect(answer).toEqual(planResult(NOTHING_PENDING));
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:做完了,完成 2/2,100%"]);
+
+  await begin($);
+  expect(await taskRowOn($)).toEqual([]);
+});
+
+test("ticking off the whole list slides the bar from where it stood up to full, even long after the last change", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, {
+    items: ["一", "二", "三", "四"].map((content, i) => ({
+      content,
+      status: i === 0 ? "in_progress" : "pending",
+    })),
+  });
+  await updatePlan($, { advance: true });
+  // 过了 5 秒:上一次的滑动早就滑完了。
+  clock.now += 5_000;
+  expect((await taskRowOn($))[0].source).not.toContain("@keyframes pr-fill");
+
+  await wrapUp($, {}, NOTHING_PENDING);
+  // 轨道 432 宽:1/4 是 108,滑到满。
+  expect((await taskRowOn($))[0].source).toContain(
+    "@keyframes pr-fill{from{transform:translateX(-324px)}to{transform:translateX(",
+  );
+});
+
+for (const [name, answer] of [
+  ["an error", { isError: true, result: "boom", text: "boom" }],
+  ["a refusal", { deny: "not allowed" }],
+] as const) {
+  test(`${name} from the host on a wrap-up leaves the band alone and goes through`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await updatePlan($, { items: TASKS });
+    const before = await stackOn($);
+    planned.answer = answer;
+    const got = await $.tool.call({ tool: WRAP_UP, tool_use_id: "tu-4", recap: "x" } as never);
+    expect(got).toEqual(answer);
+    expect(await stackOn($)).toEqual(before);
+  });
+}
+
+test("a wrap-up with nothing to ask on a list that is already all done writes no state", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS.map((task) => ({ ...task, status: "completed" })) });
+  const writes = host.stateSets;
+  await wrapUp($, {}, NOTHING_PENDING);
+  expect(host.stateSets).toBe(writes);
+});
+
+for (const [name, agentId, items] of [
+  ["no list yet", undefined, false],
+  ["a call from a subagent", "agent-1", true],
+] as const) {
+  test(`a wrap-up with ${name} leaves the band alone and the call goes through`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    if (items) await updatePlan($, { items: TASKS });
+    const before = await stackOn($);
+    const answer = await wrapUp($, { ...(agentId ? { agentId } : {}) }, NOTHING_PENDING);
+
+    expect(answer).toEqual(planResult(NOTHING_PENDING));
+    expect(await stackOn($)).toEqual(before);
+  });
+}

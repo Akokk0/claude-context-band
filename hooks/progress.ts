@@ -378,7 +378,7 @@ export function withPlan(
  * 胶囊于是总指着真在做的那一项。清单是空的就没有这一行。
  */
 export function taskRow(
-  tasks: { items: readonly Task[]; at: number; was: number } | undefined,
+  tasks: { items: readonly Task[]; at: number; was: number; asking?: boolean } | undefined,
 ): Row | undefined {
   if (!tasks || tasks.items.length === 0) return undefined;
   const order = ["completed", "in_progress", "pending"];
@@ -394,6 +394,7 @@ export function taskRow(
     done,
     was: Math.min(tasks.was, sorted.length),
     at: tasks.at,
+    ...(tasks.asking ? { status: "decide" as const } : {}),
   };
 }
 

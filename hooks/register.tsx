@@ -26,7 +26,7 @@
 import { atom, read, update } from "claude-code";
 import type { EngineInterface, Register } from "claude-code";
 
-import type { Card, Limits, Reading, Row, Turn } from "../types";
+import type { Card, Limits, Reading, Row, Task, Turn } from "../types";
 import { lifeOf, tickIn, withRequest } from "./cache";
 import { IMAGE_HEIGHT, cardAlt, cardSvg } from "./card";
 import {
@@ -268,6 +268,38 @@ export const register: Register = (on) => {
     return result;
   });
 
+  on("tool.call", { tool: "mcp__ccd_turn__wrap_up" }, async ($, e, next) => {
+    // 同上:先放行,只在旁边看。带 ask 是等用户拍板,不带是这一轮收尾、清单全部打勾。
+    const result = await next(e);
+    try {
+      // 宿主拒绝或报错的调用,这一轮没有收尾:不记。
+      if ("deny" in result && result.deny) return result;
+      if (result.isError) return result;
+      if ((e as { agentId?: string }).agentId) return result;
+      const { ask } = e as unknown as { ask?: unknown };
+      const asking = typeof ask === "string" && ask.trim() !== "";
+      // 收尾落下去什么都不变的话不写状态(先看一眼,免得白走一趟 change)。
+      const wrapped = (tasks: NonNullable<Card["tasks"]>, at: number): Card["tasks"] => {
+        if (tasks.items.length === 0) return tasks;
+        if (asking) return tasks.asking ? tasks : { ...tasks, asking: true };
+        if (tasks.items.every((task) => task.status === "completed") && !tasks.asking) return tasks;
+        const items = tasks.items.map((task): Task => ({ ...task, status: "completed" }));
+        // 打勾这一刻记时刻、「之前」取打勾之前的完成数:条从当前位置滑到满,和 advance 一样。
+        return { items, at, was: completedOf(tasks.items) };
+      };
+      const current = (await read($, card)).tasks;
+      if (!current || wrapped(current, 0) === current) return result;
+      const at = await $.clock.now();
+      await change($, (shown) => {
+        const tasks = shown.tasks && wrapped(shown.tasks, at);
+        return tasks === shown.tasks ? shown : { ...shown, tasks };
+      });
+    } catch {
+      // 看不懂就算了。
+    }
+    return result;
+  });
+
   on("prompt.context", async ($, e, next) => {
     // 接在引擎自己那几块后面;已经有一块同名的(别处带进来的旧说明)就换掉,不带两份。
     const result = await next(e);
@@ -281,7 +313,14 @@ export const register: Register = (on) => {
     // 主人发话了:等拍板的行不用再等。只认主人发的这一下 —— 后台的活回来也会开一轮,那不算回话。
     await change($, (shown) => {
       const rows = withoutDecide(shown.rows ?? []);
-      return rows === (shown.rows ?? rows) ? shown : { ...shown, rows };
+      const { asking, ...tasks } = shown.tasks ?? { asking: undefined };
+      const decided = rows !== (shown.rows ?? rows);
+      if (!decided && !asking) return shown;
+      return {
+        ...shown,
+        ...(decided ? { rows } : {}),
+        ...(shown.tasks ? { tasks: tasks as NonNullable<Card["tasks"]> } : {}),
+      };
     });
     return next(e);
   });
@@ -357,6 +396,13 @@ export const register: Register = (on) => {
         ...shown,
         ...quotas(shown, measured),
         rows: settled(at ? withoutStale(open, at) : open),
+        // 清单全做完了(收尾时打的勾),看过一轮了,新的一轮开始就收起;还在等用户回答的不收(后台的活回来开的轮不是用户回话)。
+        tasks:
+          shown.tasks &&
+          !shown.tasks.asking &&
+          completedOf(shown.tasks.items) === shown.tasks.items.length
+            ? undefined
+            : shown.tasks,
         // 太久没动静的子代理收起;跑完的在主循环答完那一下收(turn.complete)。
         agents: withoutGoneAgents(shown.agents ?? [], at),
         running: true,
