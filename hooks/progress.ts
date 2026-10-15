@@ -282,13 +282,16 @@ export function bornOf(saved: unknown): number | undefined {
   return typeof born === "number" ? born : undefined;
 }
 
-/** 一份行最后一次有人报是什么时候;一行都没有就是负无穷。 */
-export const lastReportOf = (rows: readonly Row[]) =>
-  rows.reduce((last, row) => Math.max(last, row.at), Number.NEGATIVE_INFINITY);
+/** 一份行(和任务列表)最后一次有人动是什么时候;一样都没有就是负无穷。 */
+export const lastReportOf = (rows: readonly Row[], tasks?: { at: number }) =>
+  rows.reduce((last, row) => Math.max(last, row.at), tasks?.at ?? Number.NEGATIVE_INFINITY);
 
-/** 盘上一个会话的行是不是没人管了:一行都读不出来,或者每一行都太久没人报。 */
-export function isForgotten(rows: readonly Row[], now: number): boolean {
-  return rows.every((row) => now - row.at > FORGOTTEN);
+/**
+ * 盘上一个会话是不是没人管了:一行都读不出来,或者每一行都太久没人报;
+ * 还留着任务列表的话,它也得太久没动。只有任务列表、没有行的不算没人管。
+ */
+export function isForgotten(rows: readonly Row[], now: number, tasks?: { at: number }): boolean {
+  return rows.every((row) => now - row.at > FORGOTTEN) && (!tasks || now - tasks.at > FORGOTTEN);
 }
 
 /**
@@ -396,6 +399,34 @@ export function taskRow(
     at: tasks.at,
     ...(tasks.asking ? { status: "decide" as const } : {}),
   };
+}
+
+/** 任务列表里要落盘的那些:「上一次画的完成数」不算(恢复时视为已经落定)。 */
+export const keptTasks = (tasks: { items: Task[]; at: number; asking?: boolean } | undefined) =>
+  tasks && { items: tasks.items, at: tasks.at, ...(tasks.asking ? { asking: true } : {}) };
+
+/**
+ * 盘上读回来的东西里的任务列表。和行一样每样都验:读不成就是没有(不抛错)。
+ * 恢复时「上一次画的完成数」就是现在的完成数 —— 条直接落在做到的地方,不从头滑。
+ */
+export function tasksFrom(
+  saved: unknown,
+): { items: Task[]; at: number; was: number; asking?: boolean } | undefined {
+  const tasks = (saved as { tasks?: unknown } | null)?.tasks as
+    | { items?: unknown; at?: unknown; asking?: unknown }
+    | null
+    | undefined;
+  if (typeof tasks !== "object" || tasks === null) return undefined;
+  const { items, at, asking } = tasks;
+  if (!Array.isArray(items) || items.length === 0 || typeof at !== "number" || !Number.isFinite(at))
+    return undefined;
+  const list: Task[] = [];
+  for (const item of items as Record<string, unknown>[]) {
+    if (typeof item?.content !== "string" || !isStatus(item.status)) return undefined;
+    list.push({ content: item.content, status: item.status });
+  }
+  const was = completedOf(list);
+  return { items: list, at, was, ...(asking === true ? { asking: true } : {}) };
 }
 
 /** 清单里做完了几项。 */

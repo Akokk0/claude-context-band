@@ -3745,3 +3745,105 @@ for (const [name, agentId, items] of [
     expect(await stackOn($)).toEqual(before);
   });
 }
+
+// ---- 任务列表:重启之后还在 ----
+
+const taskTexts = async ($: Engine) => (await taskRowOn($)).map((row) => row.alt);
+
+test("a task list is back after the app restarts, and the next call applies to it", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+
+  await restart($);
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+
+  await updatePlan($, { advance: true });
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,统计各文件行数 1/2,50%"]);
+});
+
+test("a call that arrives after the state was lost, with no session or turn starting in between, still finds the list on the disk", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+
+  host.isStateLost = true;
+  await updatePlan($, { advance: true });
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,统计各文件行数 1/2,50%"]);
+});
+
+test("a wrap-up that arrives after the state was lost, with no session or turn starting in between, still finds the list on the disk", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+
+  host.isStateLost = true;
+  await wrapUp($, ASK, IN_THE_BOX);
+  expect(await taskTexts($)).toEqual(["任务列表:等你拍板,列出 hooks/ 0/2,0%"]);
+});
+
+test("a task list waiting for a decision is still waiting after the app restarts", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+
+  await restart($);
+  expect(await taskTexts($)).toEqual(["任务列表:等你拍板,列出 hooks/ 0/2,0%"]);
+});
+
+test("a finished task list that was folded away does not come back after a restart", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, {}, NOTHING_PENDING);
+  await begin($);
+  expect(await taskTexts($)).toEqual([]);
+
+  await restart($);
+  expect(await taskTexts($)).toEqual([]);
+  expect(host.disk.has("rows:s-1")).toBe(false);
+});
+
+test("a task list is picked up under a new session id, and moves to it", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+
+  await resumeAs($, "s-2");
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+  expect(host.disk.has("rows:s-1")).toBe(false);
+  expect(host.disk.has("rows:s-2")).toBe(true);
+});
+
+test("a task list that does not read right on the disk is left out and nothing breaks", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  for (const tasks of [
+    "garbage",
+    { items: "x", at: NOW },
+    { items: [{ content: 5, status: "pending" }], at: NOW },
+    { items: [{ content: "a", status: "doing" }], at: NOW },
+    { items: [{ content: "a", status: "pending" }] },
+    { items: [], at: NOW },
+  ]) {
+    host.disk.set("rows:s-1", { born: 0, rows: [], tasks });
+    await restart($);
+    expect(await taskTexts($)).toEqual([]);
+    expect((await drawingsOn($))[0].alt).toBe("晴朗:上下文 18%,36.4k / 200k");
+  }
+});
+
+test("a session with only a task list and no reported rows gets it back, and its key is not cleared as empty", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  // 另一个会话也只有任务列表:最近动过的留着,一个月没动的清掉。
+  host.disk.set("rows:recent", { born: 5, rows: [], tasks: { items: TASKS, at: NOW - DAY } });
+  host.disk.set("rows:gone", { born: 6, rows: [], tasks: { items: TASKS, at: NOW - 40 * DAY } });
+
+  await restart($);
+
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+  expect([...host.disk.keys()].sort()).toEqual(["rows:recent", "rows:s-1"]);
+});
