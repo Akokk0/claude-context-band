@@ -31,6 +31,7 @@ import { lifeOf, tickIn, withRequest } from "./cache";
 import { IMAGE_HEIGHT, cardAlt, cardSvg } from "./card";
 import {
   ROW_HEIGHT,
+  completedOf,
   agentAlt,
   agentLine,
   agentSvg,
@@ -47,6 +48,7 @@ import {
   shownAgents,
   shownRows,
   statusOf,
+  taskRow,
   withAgentEnd,
   withAgentStep,
   withoutEndedAgents,
@@ -55,6 +57,7 @@ import {
   withoutDecide,
   withoutGoneAgents,
   withoutStale,
+  withPlan,
 } from "./progress";
 import {
   barHeights,
@@ -230,6 +233,39 @@ export const register: Register = (on) => {
       return next === rows ? shown : { ...shown, rows: next };
     });
     return { result: `${receiptOf(report)}带里现在 ${count} 行。` };
+  });
+
+  on("tool.call", { tool: "mcp__ccd_turn__update_plan" }, async ($, e, next) => {
+    // 先放行:任务列表是宿主的,mod 只在旁边看,绝不改动或拦下它的结果。
+    const result = await next(e);
+    try {
+      // 宿主拒绝或报错的调用,清单没有变:不记。
+      if ("deny" in result && result.deny) return result;
+      if (result.isError) return result;
+      // 子代理的清单是它自己的,不画在主对话的带子上。
+      if ((e as { agentId?: string }).agentId) return result;
+      const input = e as unknown as Record<string, unknown>;
+      // 落下去和原来一样的话不写状态:每写一次宿主就把整张图换一次。先看一眼,免得白走一趟 change。
+      const current = (await read($, card)).tasks?.items;
+      if (withPlan(current, input) === current) return result;
+      const at = await $.clock.now();
+      await change($, (shown) => {
+        const items = withPlan(shown.tasks?.items, input);
+        if (items === shown.tasks?.items) return shown;
+        return {
+          ...shown,
+          // 整份换新清单像 progress 行遇到新 plan:条从 0 起滑;增量取变动之前的完成数。
+          tasks: items && {
+            items,
+            at,
+            was: Array.isArray(input.items) ? 0 : completedOf(shown.tasks?.items),
+          },
+        };
+      });
+    } catch {
+      // 看不懂就算了,不耽误任务列表本身。
+    }
+    return result;
   });
 
   on("prompt.context", async ($, e, next) => {
@@ -414,14 +450,17 @@ export const register: Register = (on) => {
         const shown = cached(before);
         const { now, at } = measured;
         const rows = settled(shown.rows ?? []);
+        const tasks = settledTasks(shown.tasks);
         const agents = withoutEndedAgents(shown.agents ?? []);
         // 没有读数:一种是没读到,一种是卡片上本来就没有、宿主也还说不出窗口用了多少。都只收尾,不记柱子。
-        if (!now) return { ...shown, ...quotas(shown, measured), rows, agents, running: false };
+        if (!now)
+          return { ...shown, ...quotas(shown, measured), rows, tasks, agents, running: false };
         const spent = now.tokens - (shown.gauge?.base ?? now.tokens);
         return {
           ...shown,
           ...quotas(shown, measured),
           rows,
+          tasks,
           agents,
           running: false,
           turns: withTurn(shown.turns, { spent, percent: now.percent }),
@@ -447,9 +486,11 @@ export const register: Register = (on) => {
       running,
       rows: all,
       agents: sent,
+      tasks: sentTasks,
       cache,
     } = await read($, card);
-    const rows = shownRows(all ?? []);
+    const tasks = taskRow(sentTasks);
+    const rows = [...(tasks ? [tasks] : []), ...shownRows(all ?? [])];
     const agents = shownAgents(sent ?? []);
     if (e.props.hasSurvey || (!shown && rows.length === 0 && agents.length === 0)) {
       return next(e);
@@ -558,6 +599,13 @@ function settled(rows: readonly Row[]): Row[] {
   return rows.every((row) => row.was === row.done)
     ? (rows as Row[])
     : rows.map((row) => ({ ...row, was: row.done }));
+}
+
+/** 任务列表那一行「上一次画的完成数」拨到此刻;什么都不用拨时原样交回。 */
+function settledTasks(tasks: Card["tasks"]): Card["tasks"] {
+  if (!tasks) return tasks;
+  const done = completedOf(tasks.items);
+  return tasks.was === done ? tasks : { ...tasks, was: done };
 }
 
 /** 读一次用量。没读到(宿主出了岔子)就是一份空的,仪表留着上一次的。 */

@@ -99,6 +99,9 @@ const host = {
   isDiskDown: false,
   isDiskUnreadable: false,
   writes: 0,
+  /** 往会话状态里写过几回;`isStateDown`:状态写不进去(抛错)。 */
+  stateSets: 0,
+  isStateDown: false,
   onWrite: (): void | Promise<void> => {},
   tools: [] as unknown[],
 };
@@ -148,6 +151,8 @@ async function sessionAfter(
   host.isDiskDown = false;
   host.isDiskUnreadable = false;
   host.writes = 0;
+  host.stateSets = 0;
+  host.isStateDown = false;
   host.onWrite = () => {};
   host.tools = [];
   on("session.id", async () => ({ value: host.session }));
@@ -170,6 +175,8 @@ async function sessionAfter(
     return host.isStateLost ? { value: { value: undefined, version: held.value.version } } : held;
   });
   on("state.set", async (_, e, next) => {
+    host.stateSets++;
+    if (host.isStateDown) throw new Error("state down");
     const set = await next(e);
     if (set.value.isSet) host.isStateLost = false;
     return set;
@@ -3253,4 +3260,303 @@ test("on a ring that is one arc the step in hand is the next twelfth after the l
   expect((await drawingsOn($))[1].source).toContain(
     'stroke-dasharray="8.333 100" stroke-dashoffset="-41.667"/>',
   );
+});
+
+// ---- 任务列表:进度带照着桌面端的任务列表画一行 ----
+
+const UPDATE_PLAN = "mcp__ccd_turn__update_plan";
+type PlanItem = { content: string; status: "pending" | "in_progress" | "completed" };
+const TASKS: PlanItem[] = [
+  { content: "列出 hooks/ 目录文件", status: "in_progress" },
+  { content: "统计各文件行数", status: "pending" },
+];
+/** 宿主那一半给 update_plan 的底层结果。 */
+const planResult = (text: string) => ({
+  ref: 1,
+  result: [{ type: "text", text }],
+  text,
+});
+
+/** 宿主那一半对 update_plan 回的那句话;每个用例开头用 `planHost` 把宿主接上(必须在碰 `$` 之前)。 */
+const planned = { text: "Plan shown (2 steps).", answer: undefined as unknown };
+const planHost = (on: On) => {
+  planned.answer = undefined;
+  on(
+    "tool.call",
+    { tool: UPDATE_PLAN },
+    async () => (planned.answer ?? planResult(planned.text)) as never,
+  );
+};
+
+/** 模型调一次 update_plan;回的是 `$.tool.call` 交回给调用方的结果。 */
+const updatePlan = ($: Engine, input: Record<string, unknown>, text = "Plan shown (2 steps).") => {
+  planned.text = text;
+  return $.tool.call({ tool: UPDATE_PLAN, tool_use_id: "tu-1", ...input } as never);
+};
+
+// 胶囊上的字最多 10 个,超出的截掉(模型报的行是 6 个)。
+test("a plan with items becomes a task-list row, and the call goes through untouched", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  const answer = await updatePlan($, { items: TASKS, scope: "first_task" });
+  expect(answer).toEqual(planResult("Plan shown (2 steps)."));
+
+  const [gauges, row, ...rest] = await drawingsOn($);
+  expect(rest).toEqual([]);
+  expect(gauges.alt).toBe("晴朗:上下文 18%,36.4k / 200k");
+  expect(row.alt).toBe("任务列表:工作中,列出 hooks/ 0/2,0%");
+});
+
+/** 任务列表那一行(没有就是 undefined)。 */
+const taskRowOn = async ($: Engine) =>
+  (await stackOn($)).filter((row) => row.alt.startsWith("任务列表:"));
+
+test("advancing finishes the step in hand and moves the pill to the next one", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  const answer = await updatePlan(
+    $,
+    { advance: true },
+    "Plan updated: step 2 of 2 is in progress.",
+  );
+  expect(answer.text).toBe("Plan updated: step 2 of 2 is in progress.");
+
+  const rows = await taskRowOn($);
+  expect(rows.map((row) => row.alt)).toEqual(["任务列表:工作中,统计各文件行数 1/2,50%"]);
+});
+
+test("done and start together apply to the list in its original order", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, {
+    items: ["一", "二", "三", "四"].map((content, i) => ({
+      content,
+      status: i === 0 ? "in_progress" : "pending",
+    })),
+  });
+  await updatePlan($, { done: [1, 3], start: 2 });
+
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:工作中,二 2/4,50%"]);
+});
+
+test("done alone leaves the step in hand where it was", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, {
+    items: [
+      { content: "A", status: "pending" },
+      { content: "B", status: "in_progress" },
+      { content: "C", status: "pending" },
+    ],
+  });
+  await updatePlan($, { done: [3] });
+
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:工作中,B 1/3,33%"]);
+});
+
+test("advancing the task list slides the bar and the pill from where they stood, and the turn ending settles them", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, {
+    items: ["一", "二", "三", "四"].map((content, i) => ({
+      content,
+      status: i === 0 ? "in_progress" : "pending",
+    })),
+  });
+  expect((await taskRowOn($))[0].source).not.toContain("@keyframes pr-fill");
+
+  await updatePlan($, { advance: true });
+  // 轨道 432 宽:0/4 是 0,1/4 是 108。
+  const moved = (await taskRowOn($))[0].source;
+  expect(moved).toContain(
+    "@keyframes pr-fill{from{transform:translateX(-432px)}to{transform:translateX(-324px)}}",
+  );
+  expect(moved).toContain("@keyframes pr-pill{from{transform:translateX(");
+
+  await begin($);
+  await $.turn.complete(TURN);
+  const settled = (await taskRowOn($))[0].source;
+  expect(settled).not.toContain("@keyframes pr-fill");
+  expect(settled).not.toContain("@keyframes pr-pill");
+});
+
+test("a fresh list does not slide the bar back from where the old one had got to", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  const status = (i: number, done: number) =>
+    i < done ? "completed" : i === done ? "in_progress" : "pending";
+  await updatePlan($, {
+    items: ["一", "二", "三", "四"].map((content, i) => ({ content, status: status(i, 2) })),
+  });
+  await begin($);
+  await $.turn.complete(TURN);
+
+  await updatePlan($, {
+    items: ["甲", "乙", "丙", "丁"].map((content, i) => ({ content, status: status(i, 0) })),
+  });
+  const fresh = (await taskRowOn($))[0];
+  expect(fresh.alt).toBe("任务列表:工作中,甲 0/4,0%");
+  expect(fresh.source).not.toContain("@keyframes pr-fill");
+  expect(fresh.source).not.toContain("@keyframes pr-pill");
+});
+
+test("a second list in the same session replaces the first; there is still one task-list row", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await updatePlan($, {
+    items: [
+      { content: "新的一项", status: "completed" },
+      { content: "新的第二项", status: "in_progress" },
+      { content: "新的第三项", status: "pending" },
+    ],
+  });
+
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual([
+    "任务列表:工作中,新的第二项 1/3,33%",
+  ]);
+});
+
+for (const [name, input, agentId] of [
+  ["empty arguments", {}, undefined],
+  ["items that are not a list", { items: "x" }, undefined],
+  ["an item without a status", { items: [{ content: "a" }] }, undefined],
+  ["advancing with no list yet", { advance: true }, undefined],
+  ["a call from a subagent", { items: TASKS }, "agent-1"],
+] as const) {
+  test(`${name} leaves the band alone and the call goes through`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    const before = await stackOn($);
+    const answer = await updatePlan($, { ...input, ...(agentId ? { agentId } : {}) });
+
+    expect(answer).toEqual(planResult("Plan shown (2 steps)."));
+    expect(await stackOn($)).toEqual(before);
+  });
+}
+
+test("a bad call after a good list does not disturb the list", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  const before = await stackOn($);
+  await updatePlan($, { items: "x" });
+  // 子代理的清单是另一份:不画。
+  await updatePlan($, {
+    items: [{ content: "子代理的活", status: "in_progress" }],
+    agentId: "agent-1",
+  });
+  expect(await stackOn($)).toEqual(before);
+});
+
+const LIST3: PlanItem[] = [
+  { content: "A", status: "completed" },
+  { content: "B", status: "in_progress" },
+  { content: "C", status: "pending" },
+];
+
+/** 进行中的是中间那一项:被退回待做的话,胶囊会指到 A。 */
+const MIDDLE: PlanItem[] = [
+  { content: "A", status: "pending" },
+  { content: "B", status: "in_progress" },
+  { content: "C", status: "pending" },
+];
+
+test("the same list sent again changes nothing: the bar does not slide and no state is written", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await updatePlan($, { advance: true });
+  clock.now += 5_000;
+  const writes = host.stateSets;
+  await updatePlan($, {
+    items: [
+      { content: TASKS[0].content, status: "completed" },
+      { content: TASKS[1].content, status: "in_progress" },
+    ],
+  });
+
+  expect((await taskRowOn($))[0].alt).toContain("统计各文件行数 1/2");
+  expect((await taskRowOn($))[0].source).not.toContain("@keyframes pr-fill");
+  expect(host.stateSets).toBe(writes);
+});
+
+for (const [name, items, input] of [
+  [
+    "advancing a list that is all done",
+    LIST3.map((item) => ({ ...item, status: "completed" })),
+    { advance: true },
+  ],
+  ["done with nothing in it", LIST3, { done: [] }],
+  ["done with a step that is already done", LIST3, { done: [1] }],
+  ["start on the step already in hand", LIST3, { start: 2 }],
+] as const) {
+  test(`${name} writes no state`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await updatePlan($, { items });
+    const writes = host.stateSets;
+    await updatePlan($, input);
+    expect(host.stateSets).toBe(writes);
+  });
+}
+
+for (const [name, answer] of [
+  ["an error", { isError: true, result: "boom", text: "boom" }],
+  ["a refusal", { deny: "not allowed" }],
+] as const) {
+  test(`${name} from the host leaves the band alone and goes through`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    const before = await stackOn($);
+    planned.answer = answer;
+    const got = await $.tool.call({
+      tool: UPDATE_PLAN,
+      tool_use_id: "tu-3",
+      items: TASKS,
+    } as never);
+    expect(got).toEqual(answer);
+    expect(await stackOn($)).toEqual(before);
+  });
+}
+
+for (const [name, input] of [
+  ["start past the end", { start: 99 }],
+  ["start at zero", { start: 0 }],
+  ["start that is not a whole number", { start: 2.5 }],
+] as const) {
+  test(`${name} leaves the step in hand where it was`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await updatePlan($, { items: MIDDLE });
+    await updatePlan($, input);
+    expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:工作中,B 0/3,0%"]);
+  });
+}
+
+test("start on a step that done also names does not start it, so the step in hand stays", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: MIDDLE });
+  await updatePlan($, { done: [3], start: 3 });
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:工作中,B 1/3,33%"]);
+});
+
+test("a state that cannot be written does not stop the update_plan result going through", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  host.isStateDown = true;
+  expect(await updatePlan($, { items: TASKS })).toEqual(planResult("Plan shown (2 steps)."));
+});
+
+test("the task list sits above every reported row, however later reports arrive", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 1 });
+  await updatePlan($, { items: TASKS });
+  expect(await titlesOn($)).toEqual(["任务列表", "活 总"]);
+
+  await report($, { plan: "片", title: "活 片", done: 1 });
+  expect(await titlesOn($)).toEqual(["任务列表", "活 片", "活 总"]);
 });

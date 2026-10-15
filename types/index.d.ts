@@ -69,6 +69,9 @@ export type Cache = {
   life: number;
 };
 
+/** 桌面端任务列表里的一项:写的什么、做到哪了。 */
+export type Task = { content: string; status: "pending" | "in_progress" | "completed" };
+
 /**
  * 卡片画的全部东西,放在一起:一次事件只写一次,宿主就只换一次图。
  * 分开放的话,读一次数要写两三回,整张图跟着换两三回,看上去就是闪。
@@ -88,6 +91,8 @@ export type Card = {
   cache?: Cache;
   /** 报上来的活,一件一行,按最近报的排在后面。还没人报过就没有。 */
   rows?: Row[];
+  /** 桌面端的任务列表(按清单原来的顺序)、它最近一次变动的时刻、变动之前做完了几项(进度条从那儿滑过来,回合结束时拨到现在);画成固定排在进度行最上面的一行。还没有清单就没有。 */
+  tasks?: { items: Task[]; at: number; was: number };
   /** 派出去的子代理,一个一行,排在进度行上面。 */
   agents?: Agent[];
 };

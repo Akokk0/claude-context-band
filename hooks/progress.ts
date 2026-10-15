@@ -9,7 +9,7 @@
 // 画法照设计稿(Claude Design 画布上的进度行),和仪表同一套语汇:
 // 不画自己的底,亮色写成属性、暗色在 <style> 里覆盖,动画只在「这次画的和上一次不一样」时带上,样式全写在 <style> 里。
 
-import type { Agent, Phase, Row, RowStatus } from "../types";
+import type { Agent, Phase, Row, RowStatus, Task } from "../types";
 import { WIDTH, svgOf } from "./frame";
 
 /** 记着的行最多几行,记着的都画:再多,最久没报的让出来(报的人跑偏了也不至于把屏幕占满)。 */
@@ -305,6 +305,101 @@ export function withoutDecide(rows: readonly Row[]): Row[] {
     ? (rows.map(({ status, ...row }) => (status === "decide" ? row : { ...row, status })) as Row[])
     : (rows as Row[]);
 }
+
+// ---- 任务列表的行 ----
+
+/** 任务列表那一行的 plan 键:内部用,模型报的行用不到。 */
+export const TASK_PLAN = "task-list";
+/** 任务列表那一行的标题。 */
+const TASK_TITLE = "任务列表";
+/** 任务列表那一行胶囊上最多几个字(模型报的行是 NAME_CHARS)。 */
+const TASK_NAME_CHARS = 10;
+
+const isStatus = (status: unknown): status is Task["status"] =>
+  status === "pending" || status === "in_progress" || status === "completed";
+
+/** 两份清单逐项相同(写的什么、做到哪了)。 */
+const sameTasks = (a: readonly Task[], b: readonly Task[]) =>
+  a.length === b.length &&
+  a.every((task, i) => task.content === b[i]?.content && task.status === b[i]?.status);
+
+/**
+ * update_plan 的一次调用落到清单上。三种参数:
+ * - items:整份替换;
+ * - advance:进行中的做完,下一个待做的开工;
+ * - done / start:done 里的做完,第 start 项开工(1 到清单长度的整数,否则当作没给),
+ *   start 真开工了(合法、又不在 done 里),别的进行中的退回待做(序号从 1 起)。
+ * 参数不对、还没有清单就来增量、或者落下去和原来一样,都交回原来那个数组。
+ */
+export function withPlan(
+  tasks: Task[] | undefined,
+  input: Record<string, unknown>,
+): Task[] | undefined {
+  const { items, advance, done, start } = input;
+  const settle = (next: Task[]) => (tasks && sameTasks(tasks, next) ? tasks : next);
+  if (Array.isArray(items)) {
+    const list: Task[] = [];
+    for (const item of items as Record<string, unknown>[]) {
+      if (typeof item?.content !== "string" || !isStatus(item.status)) return tasks;
+      list.push({ content: item.content, status: item.status });
+    }
+    return settle(list);
+  }
+  if (!tasks) return tasks;
+  if (advance === true) {
+    const at = tasks.findIndex((task) => task.status === "in_progress");
+    const next = tasks.findIndex((task, i) => i > at && task.status === "pending");
+    return settle(
+      tasks.map((task, i): Task => {
+        if (i === at) return { ...task, status: "completed" };
+        if (i === next) return { ...task, status: "in_progress" };
+        return task;
+      }),
+    );
+  }
+  const finished = Array.isArray(done) ? (done as unknown[]) : undefined;
+  const begun =
+    typeof start === "number" && Number.isInteger(start) && start >= 1 && start <= tasks.length
+      ? start
+      : undefined;
+  if (!finished && begun === undefined) return tasks;
+  const starts = begun !== undefined && !finished?.includes(begun);
+  return settle(
+    tasks.map((task, i): Task => {
+      if (finished?.includes(i + 1)) return { ...task, status: "completed" };
+      if (starts && i + 1 === begun) return { ...task, status: "in_progress" };
+      return starts && task.status === "in_progress" ? { ...task, status: "pending" } : task;
+    }),
+  );
+}
+
+/**
+ * 清单画成的一行:每一项一个阶段、各一步,已完成的在前、进行中的其次、待做的在后(各组里照清单原来的顺序),
+ * 胶囊于是总指着真在做的那一项。清单是空的就没有这一行。
+ */
+export function taskRow(
+  tasks: { items: readonly Task[]; at: number; was: number } | undefined,
+): Row | undefined {
+  if (!tasks || tasks.items.length === 0) return undefined;
+  const order = ["completed", "in_progress", "pending"];
+  const sorted = [...tasks.items].sort((a, b) => order.indexOf(a.status) - order.indexOf(b.status));
+  const done = sorted.filter((task) => task.status === "completed").length;
+  return {
+    plan: TASK_PLAN,
+    title: TASK_TITLE,
+    phases: sorted.map((task) => ({
+      name: [...task.content].slice(0, TASK_NAME_CHARS).join("").trimEnd(),
+      steps: 1,
+    })),
+    done,
+    was: Math.min(tasks.was, sorted.length),
+    at: tasks.at,
+  };
+}
+
+/** 清单里做完了几项。 */
+export const completedOf = (items: readonly Task[] | undefined) =>
+  (items ?? []).filter((task) => task.status === "completed").length;
 
 // ---- 子代理的行 ----
 
