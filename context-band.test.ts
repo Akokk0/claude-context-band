@@ -4980,3 +4980,72 @@ test("a subagent row is not written to the disk, so its kind has nothing to come
   await restart($);
   expect(await titlesOn($)).not.toContain("勘察 ⑳");
 });
+
+test("a foreground subagent is taken off even when its id is listed in the Stop as a subagent", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($, "前台", { background: false });
+  await stop($, { background_tasks: [{ type: "subagent", id: "agent-1", status: "running" }] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent spawned without the host saying whether it is background is not taken for a foreground one", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($, "勘察 ⑳", { background: undefined });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual(["勘察 ⑳"]);
+});
+
+test("a background row is not kept by a listed task of another type that carries its id", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await stop($, { background_tasks: [{ type: "workflow", id: "agent-1", status: "running" }] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a background row is not kept by a listed subagent with another id", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await stop($, { background_tasks: [{ type: "subagent", id: "other", status: "running" }] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent dispatched again under the same id without a kind keeps the kind it had", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await spawn($, "勘察 ⑳", { background: undefined });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent dispatched again under the same id takes the new kind", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await spawn($, "前台", { background: false });
+  await stop($, { background_tasks: [{ type: "subagent", id: "agent-1", status: "running" }] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent's row keeps its kind through its model requests", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await step($, { agentId: "agent-1" });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent's row keeps its kind after its turn ends", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await step($, { agentId: "agent-1" });
+  await $.turn.complete({ ...TURN, agentId: "agent-1" });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual([]);
+});
