@@ -3561,7 +3561,7 @@ test("the usage note no longer asks for a report before the answer or a decide s
     "收尾不用专门报",
     "回合结束时",
     "等你拍板",
-    "后台命令、子代理、Monitor、定时唤醒和定时任务在等着时不切",
+    "这一轮新起的后台命令和 Monitor、子代理、工作流、定时唤醒和定时任务在等着时不切",
   ])
     expect(note).toContain(piece);
   for (const piece of ["收尾不用专门报", "回合结束时", "等用户拍板"])
@@ -4708,7 +4708,8 @@ const stop = ($: Engine, extra: Record<string, unknown> = {}) =>
     ...extra,
   } as never);
 
-const SHELL = { type: "shell", status: "running" };
+const SHELL = { type: "shell", id: "sh-1", status: "running" };
+const SHELL_2 = { type: "shell", id: "sh-2", status: "running" };
 
 test("a background shell still running in the Stop: the end of the turn hands nothing over", async ($, on) => {
   await sessionAfter($, on, [36_400]);
@@ -4835,6 +4836,115 @@ test("the end of a subagent's own turn between the main Stop and turn.complete d
   await $.turn.complete(TURN);
 
   expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+// ---- 后台命令(shell)只有这一轮新起的才算忙:上一次主循环 Stop 里就在的是常驻的,不算 ----
+
+/** 一轮:开始、Stop 报这些、答完。 */
+const roundWith = async ($: Engine, extra: Record<string, unknown>) => {
+  await begin($);
+  await stop($, extra);
+  await $.turn.complete(TURN);
+};
+
+test("a shell that was already in the previous turn's Stop and is still there: the end of the turn is handed over", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("a shell started in this turn keeps the turn open even when an older one is still running", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+
+  await roundWith($, { background_tasks: [SHELL, SHELL_2] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a subagent or workflow in the Stop keeps the turn open even when every shell is an old one", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+
+  for (const other of [
+    { type: "subagent", id: "agent-7", status: "running" },
+    { type: "workflow", id: "wf-7", status: "running" },
+  ]) {
+    await roundWith($, { background_tasks: [SHELL, other] });
+    expect(await wordsOn($)).toEqual(["工作中"]);
+  }
+});
+
+test("a cron in the Stop keeps the turn open even when every shell is an old one", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+
+  await roundWith($, {
+    background_tasks: [SHELL],
+    session_crons: [{ id: "c1", schedule: "*/5 * * * *", recurring: true, prompt: "p" }],
+  });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a shell seen only in a subagent's Stop is not remembered: it is still new in the main loop's next Stop", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { agent_id: "agent-9", background_tasks: [SHELL] });
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("an old shell replaced by a new one (same count of shells) keeps the turn open", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+
+  await roundWith($, { background_tasks: [SHELL_2] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a shell that disappears from the Stop is forgotten: when it shows up again it is new", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+  await roundWith($, {});
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a shell started in a turn that was interrupted (no Stop) counts as new at the next Stop", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, {});
+
+  await begin($);
+  await $.turn.complete({ ...TURN, isAborted: true, reason: "aborted" } as never);
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("after a restart the first Stop takes the running shells as new", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await roundWith($, { background_tasks: [SHELL] });
+
+  await restart($);
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["工作中"]);
+
+  await roundWith($, { background_tasks: [SHELL] });
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
 });
 
 // ---- prompt.submit 只在用户真回话时撤拍板 ----
