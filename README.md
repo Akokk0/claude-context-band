@@ -126,7 +126,7 @@ vp run test        # 跑测试
 - 测试用的是 Claude Code 自带的跑具(`claude plugin test`),不是 vitest:要用 `vp run test`,直接 `vp test` 跑不到它们。
 - 格式用 oxfmt 的默认写法,lint 用 oxlint 的默认规则,都没有配置文件。
 - `python3 scripts/logo.py` 重新生成 `docs/images/logo.svg`。
-- 类型检查要等 Claude Code 把这个 mod 加载过一次才跑得起来,见下面 `.claude-plugin/types/` 那一段。
+- `vp run typecheck` 会先让本机的 Claude Code 把 `.claude-plugin/types/` 写出来或刷新,所以要 `claude` 在 PATH 上(校验和测试本来就要它)。新克隆的仓或 worktree 只要先 `vp install`。
 
 | 文件                   | 管什么                                |
 | ---------------------- | ------------------------------------- |
@@ -139,7 +139,7 @@ vp run test        # 跑测试
 | `types/index.d.ts`     | 状态的形状                            |
 | `context-band.test.ts` | 测试                                  |
 
-`.claude-plugin/types/` 里是 Claude Code 生成的类型声明,不入库,根目录的 `tsconfig.json` 接在它上面。Claude Code 从这个文件夹加载 mod 时会把它写出来,新克隆的仓里还没有:不影响校验和测试,但类型检查和编辑器里的类型提示要等加载过一次才有。测试文件眼下不在类型检查的范围里。
+`.claude-plugin/types/` 里是 Claude Code 生成的类型声明,不入库,根目录的 `tsconfig.json` 接在它上面。`vp run typecheck` 开头的 `scripts/plugin-types.mjs` 会借 `claude --plugin-dir` 把它写出来或刷新(用临时配置目录,不发模型请求);`claude` 没跑成而目录已有时只警告,目录也没有就报错。编辑器里的类型提示也靠这个目录,新检出跑过一次 typecheck 就有。测试文件眼下不在类型检查的范围里。
 
 ## 已知的事
 

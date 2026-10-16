@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "check": "vp check",
-    "typecheck": "tsc -p .",
+    "typecheck": "node scripts/plugin-types.mjs && tsc -p .",
     "validate": "claude plugin validate .",
     "test": "claude plugin test ."
   },
