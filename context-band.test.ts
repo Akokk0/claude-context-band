@@ -106,6 +106,8 @@ const host = {
   isStateDown: false,
   onWrite: (): void | Promise<void> => {},
   unreadableKeys: new Set<string>(),
+  /** `isKeysDown`:只有列键抛错,读写各个键都好(和整盘读不了不同)。 */
+  isKeysDown: false,
   onRead: (_key: string): void | Promise<void> => {},
   tools: [] as unknown[],
 };
@@ -161,6 +163,7 @@ async function sessionAfter(
   host.isStateDown = false;
   host.onWrite = () => {};
   host.unreadableKeys.clear();
+  host.isKeysDown = false;
   host.onRead = () => {};
   host.tools = [];
   on("session.id", async () => ({ value: host.session }));
@@ -181,7 +184,10 @@ async function sessionAfter(
   on("store.delete", async (_, e) => ({
     value: onDisk(() => void (host.writes++, host.disk.delete(e.key))),
   }));
-  on("store.keys", async () => ({ value: onDisk(() => [...host.disk.keys()], "read") }));
+  on("store.keys", async () => {
+    if (host.isKeysDown) throw new Error("keys unavailable");
+    return { value: onDisk(() => [...host.disk.keys()], "read") };
+  });
   // 宿主替会话存着的状态还是引擎自己那份,这里只在「进程重启过」之后把它读成从没写过,直到下一次写落下去。
   on("state.get", async (_, e, next) => {
     const held = await next(e);
@@ -2343,6 +2349,24 @@ test("readings that move the gauges alone do not write to the disk", async ($, o
   expect(host.writes).toBe(written);
 });
 
+test("settling the task list's bar when the turn ends does not write to the disk, and the disk keeps no drawn position", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await updatePlan($, { advance: true });
+  await begin($);
+  const written = host.writes;
+  expect(written).toBeGreaterThan(0);
+
+  // 这一轮 Stop 报着后台的活在等:不交回,所以结束时唯一动的是清单上「上一次画的完成数」。
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+
+  expect(host.writes).toBe(written);
+  expect(host.disk.get("rows:s-1")).toMatchObject({ tasks: { at: NOW } });
+  expect((host.disk.get("rows:s-1") as { tasks: object }).tasks).not.toHaveProperty("was");
+});
+
 test("a hot reload (the session starts again with its state still there) keeps the rows on the band over the ones on the disk", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { plan: "总", title: "总进度", done: 1 });
@@ -2468,6 +2492,46 @@ test("rows from the disk and rows reported while it could not be read, together 
   expect(await titlesOn($)).toEqual(titles);
 });
 
+test("the rows left after the cut keep the order they were merged in, not the order they were reported in", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  for (let i = 0; i < 10; i++) {
+    clock.now = NOW + i;
+    await report($, { plan: `p${i}`, title: `活 ${i}`, done: 1 });
+  }
+
+  // 盘读不了时重报最老的 p0(时刻最新,原位替换),再报一行新的:p1 让出来,p0 仍在它原来的位置。
+  host.isDiskUnreadable = true;
+  await restart($);
+  clock.now = NOW + 100;
+  await report($, { plan: "p0", title: "活 0", done: 1 });
+  clock.now = NOW + 101;
+  await report($, { plan: "p10", title: "活 10", done: 1 });
+  host.isDiskUnreadable = false;
+  await begin($);
+
+  const titles = ["活 10", "活 9", "活 8", "活 7", "活 6", "活 5", "活 4", "活 3", "活 2", "活 0"];
+  expect(await titlesOn($)).toEqual(titles);
+  await restart($);
+  expect(await titlesOn($)).toEqual(titles);
+});
+
+test("a key of another session that cannot be read stops the search for this conversation's past: nothing is picked up or written until it can be read", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  host.unreadableKeys.add("rows:s-1");
+  await resumeAs($, "s-2");
+  expect(await titlesOn($)).toEqual([]);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+  expect(await titlesOn($)).toEqual(["新的一片"]);
+  expect([...host.disk.keys()]).toEqual(["rows:s-1"]);
+
+  host.unreadableKeys.clear();
+  await report($, { plan: "片", title: "新的一片", done: 2 });
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+  expect([...host.disk.keys()]).toEqual(["rows:s-2"]);
+});
+
 test("a row reported while the disk could not be read is written once the disk can be read, even if the rows do not change after that", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { plan: "总", title: "总进度", done: 1 });
@@ -2493,6 +2557,33 @@ test("a key of another session that cannot be read does not stop this session's 
   expect(await titlesOn($)).toEqual(["总进度"]);
   await report($, { plan: "片", title: "新的一片", done: 1 });
 
+  await restart($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+});
+
+test("clearing carries on past a key that cannot be read: the ones after it that nobody has reported in for a month still go", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  host.disk.set("rows:a", { born: 5, rows: [] });
+  host.disk.set("rows:b", { born: 6, rows: [{ ...SAVED, at: NOW - 40 * DAY }] });
+  host.unreadableKeys.add("rows:a");
+
+  await restart($);
+
+  expect([...host.disk.keys()].sort()).toEqual(["rows:a", "rows:s-1"]);
+  expect(await titlesOn($)).toEqual(["总进度"]);
+});
+
+test("a disk that cannot list its keys still gives this session its own rows back, and what is reported after is saved", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  host.isKeysDown = true;
+  await restart($);
+  expect(await titlesOn($)).toEqual(["总进度"]);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+
+  host.isKeysDown = false;
   await restart($);
   expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
 });
@@ -2556,6 +2647,23 @@ test("rows picked up under a new session id keep the old key when saving them un
   };
   await resumeAs($, "s-2");
   expect([...host.disk.keys()]).toEqual(["rows:s-1"]);
+
+  host.onWrite = () => {};
+  await restart($);
+  expect(await titlesOn($)).toEqual(["总进度"]);
+});
+
+test("a failed move to a new session id leaves the old key alone even when it is old enough to be cleared", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 过了四十天才换 id,而且新 id 底下写不下去:旧键是唯一的一份,清理不能把它也清了。
+  clock.now += 40 * DAY;
+  host.onWrite = () => {
+    throw new Error("write failed");
+  };
+  await resumeAs($, "s-2");
+  expect(host.disk.has("rows:s-1")).toBe(true);
 
   host.onWrite = () => {};
   await restart($);
@@ -2704,6 +2812,21 @@ test("of several pasts left on the disk by one conversation, the one reported la
   expect(await titlesOn($)).toEqual(["晚的"]);
 });
 
+test("of several pasts left on the disk by one conversation, a task list touched later counts as the one reported last", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  host.disk.set("rows:a", {
+    born: 0,
+    rows: [{ ...SAVED, title: "有清单的", at: NOW - 2 * DAY }],
+    tasks: { items: TASKS, at: NOW - 3_600_000 },
+  });
+  host.disk.set("rows:b", { born: 0, rows: [{ ...SAVED, title: "没清单的", at: NOW - DAY }] });
+
+  await resumeAs($, "s-2");
+
+  expect(await titlesOn($)).toEqual(["任务列表", "有清单的"]);
+});
+
 test("a session that already has rows of its own under its id keeps them and takes no one else's", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { plan: "总", title: "总进度", done: 1 });
@@ -2827,6 +2950,34 @@ test("rows an earlier run left on the disk come back; whatever does not read as 
   await restart($);
   expect(await rowsOn($)).toEqual([]);
   expect((await drawingsOn($))[0].alt).toBe("晴朗:上下文 18%,36.4k / 200k");
+});
+
+test("more rows than are kept on the disk: the ones that sit last come back, whichever were reported most recently", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  // 位置靠前的两行时刻最新,其余时刻递增但都更早:接回来只看位置(靠后的留下),不看时刻。
+  host.disk.set(
+    "rows:s-1",
+    Array.from({ length: 12 }, (_, i) => ({
+      ...SAVED,
+      plan: `p${i}`,
+      title: `活 ${i}`,
+      at: i < 2 ? NOW - i : NOW - 1_000 + i,
+    })),
+  );
+  await restart($);
+
+  const titles = await titlesOn($);
+  expect(titles).toHaveLength(10);
+  expect(titles).toEqual(Array.from({ length: 10 }, (_, i) => `活 ${11 - i}`));
+});
+
+test("a waiting mark on the disk that is not exactly true is not read back as waiting", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  for (const handed of ["yes", 1, {}]) {
+    host.disk.set("rows:s-1", { born: 0, rows: [SAVED], handed });
+    await restart($);
+    expect(await rowsOn($)).toEqual(["总进度:勘察阶段,勘察 0.1/3,11%"]);
+  }
 });
 
 test("rows left by sessions nobody has reported in for a month are cleared off the disk when a session is picked up; its own are not", async ($, on) => {
@@ -3613,6 +3764,25 @@ test("advancing the task list slides the bar and the pill from where they stood,
   expect(settled).not.toContain("@keyframes pr-pill");
 });
 
+test("advancing a list that already has steps done slides the bar from where it stood, not from the start", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, {
+    items: ["一", "二", "三", "四"].map((content, i) => ({
+      content,
+      status: i === 0 ? "completed" : i === 1 ? "in_progress" : "pending",
+    })),
+  });
+  await begin($);
+  await $.turn.complete(TURN);
+
+  await updatePlan($, { advance: true });
+  // 轨道 432 宽:1/4 是 108,2/4 是 216。
+  expect((await taskRowOn($))[0].source).toContain(
+    "@keyframes pr-fill{from{transform:translateX(-324px)}to{transform:translateX(-216px)}}",
+  );
+});
+
 test("a fresh list does not slide the bar back from where the old one had got to", async ($, on) => {
   planHost(on);
   await sessionAfter($, on, [36_400]);
@@ -3696,6 +3866,43 @@ const MIDDLE: PlanItem[] = [
   { content: "B", status: "in_progress" },
   { content: "C", status: "pending" },
 ];
+
+test("a new list that begins with the old one but has a step more is a new list", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  const writes = host.stateSets;
+  await updatePlan($, { items: [...TASKS, { content: "第三项", status: "pending" }] });
+
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/3,0%"]);
+  expect(host.stateSets).toBeGreaterThan(writes);
+});
+
+test("advancing starts the first step still to do after the one in hand, not one before it", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: MIDDLE });
+  await updatePlan($, { advance: true });
+
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:工作中,C 1/3,33%"]);
+});
+
+test("an empty list draws no task-list row, and the rows reported still turn to waiting at the end of the turn", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await updatePlan($, { items: [] });
+  expect(await taskRowOn($)).toEqual([]);
+  // 先有清单再换成空的也一样。
+  await updatePlan($, { items: TASKS });
+  await updatePlan($, { items: [] });
+  expect(await taskRowOn($)).toEqual([]);
+
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(await titlesOn($)).toEqual(["活 总"]);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
 
 test("the same list sent again changes nothing: the bar does not slide and no state is written", async ($, on) => {
   planHost(on);
@@ -3838,6 +4045,21 @@ test("a finished list that is still waiting for the user's answer stays through 
   expect((await taskRowOn($)).map((row) => row.alt)).toEqual([]);
 });
 
+test("ticking off the list while a question is still waiting turns the row to done, not waiting; the next turn folds it", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+  await begin($);
+  expect(await taskTexts($)).toEqual(["任务列表:等你拍板,列出 hooks/ 0/2,0%"]);
+
+  await wrapUp($, {}, NOTHING_PENDING);
+  expect(await taskTexts($)).toEqual(["任务列表:做完了,完成 2/2,100%"]);
+
+  await begin($);
+  expect(await taskTexts($)).toEqual([]);
+});
+
 test("asking again while already asking writes no state", async ($, on) => {
   planHost(on);
   await sessionAfter($, on, [36_400]);
@@ -3949,6 +4171,20 @@ for (const [name, answer] of [
   });
 }
 
+for (const [name, input] of [
+  ["a question", ASK],
+  ["nothing to ask", {}],
+] as const) {
+  test(`a wrap-up with ${name} on an empty list writes no state`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await updatePlan($, { items: [] });
+    const writes = host.stateSets;
+    await wrapUp($, input, input === ASK ? IN_THE_BOX : NOTHING_PENDING);
+    expect(host.stateSets).toBe(writes);
+  });
+}
+
 test("a wrap-up with nothing to ask on a list that is already all done writes no state", async ($, on) => {
   planHost(on);
   await sessionAfter($, on, [36_400]);
@@ -4052,6 +4288,13 @@ test("a task list that does not read right on the disk is left out and nothing b
     { items: "x", at: NOW },
     { items: [{ content: 5, status: "pending" }], at: NOW },
     { items: [{ content: "a", status: "doing" }], at: NOW },
+    {
+      items: [
+        { content: "a", status: "pending" },
+        { content: "b", status: "doing" },
+      ],
+      at: NOW,
+    },
     { items: [{ content: "a", status: "pending" }] },
     { items: [], at: NOW },
   ]) {
@@ -4074,6 +4317,93 @@ test("a session with only a task list and no reported rows gets it back, and its
 
   expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
   expect([...host.disk.keys()].sort()).toEqual(["rows:recent", "rows:s-1"]);
+});
+
+test("a task list sent while the disk could not be read is not replaced by the one on the disk once it can be read", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await updatePlan($, { items: [{ content: "全新的一项", status: "in_progress" }] });
+  host.isDiskUnreadable = false;
+  await begin($);
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,全新的一项 0/1,0%"]);
+
+  await restart($);
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,全新的一项 0/1,0%"]);
+});
+
+test("a task list sent while the disk could not be read is written once the disk can be read, even if it does not change after that", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await updatePlan($, { items: TASKS });
+  host.isDiskUnreadable = false;
+  await begin($);
+
+  await restart($);
+  expect(await taskTexts($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+  expect(await titlesOn($)).toEqual(["任务列表", "总进度"]);
+});
+
+test("a task list picked up after a restart sits where the work had got to: the bar does not slide in from the start again", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await updatePlan($, { advance: true });
+  await begin($);
+  await $.turn.complete(TURN);
+  const settled = (await taskRowOn($))[0].source;
+  expect(settled).not.toContain("@keyframes pr-fill");
+
+  wire.silent = true;
+  await restart($);
+
+  expect(unphased((await taskRowOn($))[0].source)).toBe(unphased(settled));
+});
+
+test("a session whose own key holds only a task list takes no one else's rows", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  host.disk.set("rows:s-1", { born: 0, rows: [{ ...SAVED, title: "旧的", at: NOW }] });
+  host.disk.set("rows:s-2", { born: 0, rows: [], tasks: { items: TASKS, at: NOW } });
+
+  await resumeAs($, "s-2");
+
+  expect(await titlesOn($)).toEqual(["任务列表"]);
+  expect([...host.disk.keys()].sort()).toEqual(["rows:s-1", "rows:s-2"]);
+  expect((host.disk.get("rows:s-2") as { tasks: unknown }).tasks).toMatchObject({ at: NOW });
+});
+
+test("another session's key with only an empty task list counts as empty and is cleared", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  host.disk.set("rows:other", { born: 6, rows: [], tasks: { items: [], at: NOW } });
+
+  await restart($);
+
+  expect([...host.disk.keys()]).toEqual(["rows:s-1"]);
+});
+
+test("a session with rows is not cleared while its task list was touched recently, however old its rows are", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  host.disk.set("rows:other", {
+    born: 6,
+    rows: [{ ...SAVED, at: NOW - 40 * DAY }],
+    tasks: { items: TASKS, at: NOW - DAY },
+  });
+
+  await restart($);
+
+  expect([...host.disk.keys()].sort()).toEqual(["rows:other", "rows:s-1"]);
 });
 
 // ---- 回合结束:进度带自己把最上面那一条没做完的行切成「等你拍板」 ----
@@ -4288,6 +4618,43 @@ test("the waiting the end of the turn set survives a restart, and the next turn 
   expect(host.disk.get("rows:s-1")).not.toHaveProperty("handed");
 });
 
+test("the waiting the end of the turn set survives a second restart too: starting the session again keeps writing it down", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+
+  await restart($);
+  expect(host.disk.get("rows:s-1")).toMatchObject({ handed: true });
+  await restart($);
+  expect(await rowsOn($)).toEqual(["活 总:等你拍板,施工 1.1/3,33%"]);
+});
+
+test("the waiting the end of the turn set moves with the rows to a new session id", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+
+  await resumeAs($, "s-2");
+  expect(await rowsOn($)).toEqual(["活 总:等你拍板,施工 1.1/3,33%"]);
+});
+
+test("the move to a new session id writes the waiting down with the rows, before anything else writes", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+
+  // 换了 id 之后头一件事是撤一个不存在的行:这一下不改带里的任何东西,落盘的只有接回来那一次。
+  host.session = "s-2";
+  host.isStateLost = true;
+  await report($, { plan: "无", title: "无", done: 0, remove: true });
+
+  expect(host.disk.get("rows:s-2")).toMatchObject({ handed: true });
+  expect(host.disk.has("rows:s-1")).toBe(false);
+});
+
 // ---- 「忙不忙」看主循环 Stop 里报的后台活和定时,不看卡片上子代理那一行 ----
 
 /** 主循环的一次 Stop(不带 agent_id):里面报着这一刻还有什么后台活、什么定时在等。 */
@@ -4367,6 +4734,17 @@ test("a Stop with an agent_id is not the main loop's: its background work does n
   expect(await wordsOn($)).toEqual(["等你拍板"]);
 });
 
+test("a Stop with an agent_id that sees background work, after the main loop's own Stop, does not count either", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($);
+  await stop($, { agent_id: "agent-9", background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
 test("what one turn's Stop saw does not leak into the next turn", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { done: 3 });
@@ -4401,6 +4779,17 @@ test("a subagent's turn.start between the main Stop and turn.complete does not w
   await begin($);
   await stop($, { background_tasks: [SHELL] });
   await $.turn.start({ text: "go", turnId: "t2", agentId: "agent-9" } as never);
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("the end of a subagent's own turn between the main Stop and turn.complete does not use up what the Stop saw", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete({ ...TURN, turnId: "t2", agentId: "agent-9" } as never);
   await $.turn.complete(TURN);
 
   expect(await wordsOn($)).toEqual(["工作中"]);
