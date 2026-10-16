@@ -483,6 +483,7 @@ export function withSpawn(
   title: string,
   at: number,
   model?: string,
+  kind?: Agent["kind"],
 ): Agent[] {
   const old = agents.find((agent) => agent.id === id);
   if (old)
@@ -496,6 +497,7 @@ export function withSpawn(
             at,
             model,
             effort: old.effort,
+            kind: kind ?? old.kind,
           }
         : agent,
     );
@@ -505,7 +507,7 @@ export function withSpawn(
       : agents;
   return [
     ...agents.filter((agent) => kept.includes(agent)),
-    { id, title: title || "子代理", steps: 0, since: at, at, model },
+    { id, title: title || "子代理", steps: 0, since: at, at, model, kind },
   ];
 }
 
@@ -538,6 +540,7 @@ export function withAgentStep(
       at,
       model,
       effort,
+      kind: agent.kind,
     };
   });
 }
@@ -560,6 +563,7 @@ export function withAgentEnd(
           at,
           model: agent.model,
           effort: agent.effort,
+          kind: agent.kind,
           ended,
           endedTurn: turnId,
         }
@@ -581,6 +585,30 @@ export function withoutEndedAgents(agents: readonly Agent[]): Agent[] {
 export function withoutGoneAgents(agents: readonly Agent[], now: number): Agent[] {
   const stay = (agent: Agent) => !now || now - agent.at <= AGENT_STALE;
   return agents.every(stay) ? (agents as Agent[]) : agents.filter(stay);
+}
+
+/**
+ * 主循环的 Stop 报上来此刻还有哪些后台的活:悄悄死掉的子代理(被停掉的没有 turn.complete)据此收起。
+ * 后台的看 id 还在不在子代理那几项里;工作流派的不单独列,只看有没有工作流在跑;前台的主循环这一轮之内必定跑完。
+ * 没有 kind 的行不动。
+ */
+export function withoutDeadAgents(
+  agents: readonly Agent[],
+  tasks: readonly { id: string; type: string }[],
+): Agent[] {
+  const alive = (agent: Agent) => {
+    switch (agent.kind) {
+      case "background":
+        return tasks.some((task) => task.type === "subagent" && task.id === agent.id);
+      case "workflow":
+        return tasks.some((task) => task.type === "workflow");
+      case "foreground":
+        return false;
+      default:
+        return true;
+    }
+  };
+  return agents.every(alive) ? (agents as Agent[]) : agents.filter(alive);
 }
 
 /** 带里从上到下:后派的在上。 */

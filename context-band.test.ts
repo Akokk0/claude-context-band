@@ -1196,12 +1196,13 @@ test("the pill carries the decimal only while the phase in hand has steps of its
   expect(await at(5)).toContain("完成 4/4,");
 });
 
-const spawn = ($: Engine, description = "勘察 ⑳") =>
+const spawn = ($: Engine, description = "勘察 ⑳", extra: Record<string, unknown> = {}) =>
   $.agent.spawn({
     description,
     prompt: "p",
     subagentType: "sonnet-xhigh",
     background: true,
+    ...extra,
   } as never);
 
 test("every image in the band is equally wide and leaves the same margin on both sides of what it draws", async ($, on) => {
@@ -4743,7 +4744,7 @@ test("a recurring cron in the Stop: nothing is handed over, so the band does not
   expect(await wordsOn($)).toEqual(["工作中"]);
 });
 
-test("a subagent row left hanging as running, but the Stop says nothing is running: the turn is handed over", async ($, on) => {
+test("a subagent row left hanging as running, but the Stop says nothing is running: the row is taken off and the turn is handed over", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { done: 3 });
   await spawn($);
@@ -4751,7 +4752,7 @@ test("a subagent row left hanging as running, but the Stop says nothing is runni
   await stop($);
   await $.turn.complete(TURN);
 
-  expect(await wordsOn($)).toEqual(["子代理在跑", "等你拍板"]);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
 });
 
 test("a turn the user stopped sends no Stop: it is handed over even with a subagent row left running", async ($, on) => {
@@ -4898,4 +4899,84 @@ test("the end-of-turn handover is not taken back by a task-notification submissi
 
   await begin($);
   expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+// ---- 悄悄死掉的子代理:下一次主循环 Stop 对账收掉 ----
+
+const WORKFLOW = {
+  background: false,
+  subagentType: "workflow-subagent",
+  workflow: { runId: "r", agentIndex: 0 },
+};
+
+test("a background subagent that is no longer in the main Stop's background tasks (killed, no turn.complete) is taken off at once", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await stop($, { background_tasks: [SHELL] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a background subagent still listed in the main Stop keeps its row", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await stop($, { background_tasks: [{ type: "subagent", id: "agent-1", status: "running" }] });
+  expect(await titlesOn($)).toEqual(["勘察 ⑳"]);
+});
+
+test("a workflow's subagent keeps its row while the Stop lists any workflow", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($, "流程", WORKFLOW);
+  await stop($, { background_tasks: [{ type: "workflow", id: "wq1", status: "running" }] });
+  expect(await titlesOn($)).toEqual(["流程"]);
+});
+
+test("a workflow's subagent is taken off when the Stop lists no workflow", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($, "流程", WORKFLOW);
+  await stop($, { background_tasks: [{ type: "subagent", id: "other", status: "running" }] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a foreground subagent cannot outlive the main turn: the Stop takes it off", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($, "前台", { background: false });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual([]);
+});
+
+test("a subagent's own Stop (with agent_id) reconciles nothing", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await stop($, { agent_id: "agent-1", background_tasks: [] });
+  expect(await titlesOn($)).toEqual(["勘察 ⑳"]);
+});
+
+test("a Stop without a background_tasks field reconciles nothing", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await spawn($);
+  await $.classic.Stop({ stop_hook_active: false } as never);
+  expect(await titlesOn($)).toEqual(["勘察 ⑳"]);
+});
+
+test("a row with no kind (made by a request from a subagent nobody saw start) is left to the hour-long sweep", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await begin($);
+  await step($, { agentId: "agent-9" });
+  await stop($, { background_tasks: [] });
+  expect(await titlesOn($)).toEqual(["子代理"]);
+});
+
+test("a subagent row is not written to the disk, so its kind has nothing to come back from after a restart", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 1 });
+  await spawn($);
+  await restart($);
+  expect(await titlesOn($)).not.toContain("勘察 ⑳");
 });

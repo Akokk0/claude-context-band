@@ -60,6 +60,7 @@ import {
   withSaved,
   withSpawn,
   withoutDecide,
+  withoutDeadAgents,
   withoutGoneAgents,
   withoutStale,
   withPlan,
@@ -357,9 +358,19 @@ export const register: Register = (on) => {
     const id = result.agentId;
     if (id) {
       const at = await $.clock.now();
+      // 工作流派的子代理 background 是 false、带 workflow(类型里还没有这个字段)。
+      // 宿主没明说 background 的不认作前台:认错了会把还在跑的收掉,不认只是照旧等一小时。
+      const background = (e as { background?: boolean }).background;
+      const kind = (e as { workflow?: unknown }).workflow
+        ? "workflow"
+        : background === true
+          ? "background"
+          : background === false
+            ? "foreground"
+            : undefined;
       await change($, (shown) => ({
         ...shown,
-        agents: withSpawn(shown.agents ?? [], id, e.description, at, result.model),
+        agents: withSpawn(shown.agents ?? [], id, e.description, at, result.model, kind),
       }));
     }
     return result;
@@ -416,6 +427,17 @@ export const register: Register = (on) => {
         busy = (e.background_tasks?.length ?? 0) > 0 || (e.session_crons?.length ?? 0) > 0;
     } catch {
       // 看不懂就当不忙。
+    }
+    // 同一刻对账子代理的行:没在 background_tasks 里的(悄悄死掉的)收起。这个字段没报上来就整个不对账。
+    try {
+      const tasks = e.agent_id ? undefined : e.background_tasks;
+      if (tasks)
+        await change($, (shown) => {
+          const agents = withoutDeadAgents(shown.agents ?? [], tasks);
+          return agents === (shown.agents ?? agents) ? shown : { ...shown, agents };
+        });
+    } catch {
+      // 对不上账就留着,等一小时的清理。
     }
     return next(e);
   });
