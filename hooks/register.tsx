@@ -422,8 +422,9 @@ export const register: Register = (on) => {
 
   on("turn.start", async ($, e, next) => {
     const result = await next(e);
-    // 后台子代理开跑时也会触发一次 turn.start:那不是主循环的新一轮,回合结束切的拍板不撤。
-    const isMain = !(e as { agentId?: string }).agentId;
+    // 后台子代理开跑时也会触发一次 turn.start(事件里带 agentId):那不是主循环的新一轮,卡片什么都不动
+    // (仪表起点、收起做完的行、清太久没动静的子代理、置在跑、撤回合结束切的拍板,这一套都只属于主循环)。
+    if ((e as { agentId?: string }).agentId) return result;
     // 起点是卡片上已有的读数,不现读:宿主报的用量只算到上一次请求发出去时,不含那次回应,
     // 拿它当起点会把上一轮的回应算进这一轮(真机上撞过)。两轮之间压缩过的话,session.compact 那边已经把读数落下去了。
     // 「上一次画的」也拨到此刻,上一轮带进来的入场动画就不会跟着这次重画再播一遍。
@@ -436,7 +437,7 @@ export const register: Register = (on) => {
       // 下一轮主循环开始:回合结束自动切的拍板撤掉(wrap_up 的问题、模型传的 decide 不归它管,留着)。
       const { handed: _handed, ...rest } = shown;
       return {
-        ...(isMain ? rest : shown),
+        ...rest,
         ...quotas(shown, measured),
         rows: settled(at ? withoutStale(open, at) : open),
         // 清单全做完了(收尾时打的勾),看过一轮了,新的一轮开始就收起;还在等用户回答的不收(后台的活回来开的轮不是用户回话,见 prompt.submit)。

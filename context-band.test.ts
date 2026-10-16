@@ -4586,6 +4586,47 @@ test("a turn a subagent starts does not take the waiting back", async ($, on) =>
   expect(await wordsOn($)).toEqual(["等你拍板"]);
 });
 
+// 后台子代理开跑时宿主也触发一次 turn.start(带 agentId):那不是主循环的新一轮,卡片什么都不动。
+const subagentStarts = ($: Engine) =>
+  $.turn.start({ text: "go", turnId: "t2", agentId: "agent-9" } as never);
+
+test("a turn a subagent starts leaves the gauge's starting point where the main turn put it", async ($, on) => {
+  const use = await sessionAfter($, on, [0, 36_400]);
+  await begin($);
+  use(100_000);
+  await step($);
+  await subagentStarts($);
+
+  // 这一轮的柱子仍从 36.4k 起算:涨了 63.6k,不是 0。
+  expect(spentOn(await sourceOn($, { isWorking: true }))).toBe("+63.6k");
+});
+
+test("a turn a subagent starts does not fold away the rows that are done", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 10 });
+  expect(await wordsOn($)).toEqual(["做完了"]);
+  await subagentStarts($);
+
+  expect(await wordsOn($)).toEqual(["做完了"]);
+});
+
+test("a turn a subagent starts does not fold away a task list that is all ticked off", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, {}, NOTHING_PENDING);
+  await subagentStarts($);
+
+  expect((await taskRowOn($)).map((row) => row.alt)).toEqual(["任务列表:做完了,完成 2/2,100%"]);
+});
+
+test("a turn a subagent starts while the main loop is idle does not make the band show running", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await subagentStarts($);
+
+  expect(await sourceOn($, { isWorking: true })).not.toContain('class="cw-card is-working"');
+});
+
 test("a handover read back from the disk in the middle of a running turn is not taken: the turn is still going", async ($, on) => {
   await sessionAfter($, on, [36_400]);
   await report($, { plan: "总", title: "活 总", done: 3 });
