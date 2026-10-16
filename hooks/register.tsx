@@ -88,6 +88,17 @@ const card = atom(
  */
 type Measure = { now?: Reading; window?: number; limits?: Limits; at: number };
 
+/**
+ * 主循环这一轮的 Stop 报上来「还有活在等着」:后台命令、Monitor、后台子代理(background_tasks),
+ * 或定时唤醒、重复执行的定时(session_crons)至少有一个。真机量过(桌面端内置 CLI 2.1.299):
+ * 正常结束的回合 classic.Stop 先到、turn.complete 晚 30–120 毫秒到;用户点停止打断的回合不发 Stop;
+ * 子代理收场走 SubagentStop、主循环的 Stop 不带 agent_id。所以没收到 Stop 就当不忙:
+ * 不只是被打断的回合,API 出错(走 StopFailure)也一样。Stop 被别的钩子拦下、这一轮接着跑又被打断的话,
+ * 用的是被拦下那次 Stop 记下的值。
+ * 模块变量:回合结束取用后清掉;热加载丢了就当不忙。
+ */
+let busy = false;
+
 /** 这一轮最后一次请求收完时窗口的读数,留给回合结束用。模块变量:热加载丢了就现读。 */
 let landing: { turnId: string; now?: Reading; cached?: (shown: Card) => Card } | undefined;
 
@@ -181,7 +192,7 @@ const USAGE = {
     "- **有桌面端任务列表(`mcp__ccd_turn__update_plan`)时**:手上这件活的每一步,由任务列表自动显示在进度带最上面,不用再用 progress 一步步报。progress 只报任务列表装不下的大进度 —— 总进度和当前大阶段两条(先报总、再报段),换片、换阶段时报,和那一步的真活(提交、派下一片等)放在同一条消息里发。",
     "- **没有任务列表的会话里,大工程报三条,先大后细**:先报的行在下、后报的在上,所以按「总、段、件」的顺序报,最下面是总进度,越往上越细。「整个工程」每个大阶段列成一个阶段、各一步;「当前这个大阶段」只列一个阶段,里面每件活一步;「手上这一件」每个小件一个阶段,小件里再分步。只为算进度而存在的准备、勘察、开工不单列阶段。做完一个小件更新第三条;做完一整件更新第二条并换第三条;走完一个大阶段更新第一条。只做一件不属于大工程的小活时,报一条就够。",
     "- **行上的字由 mod 算**:胶囊写的是正在做的那个阶段的名字。行尾是一个分数,数的是做完的(刚开工是 0):只有一个阶段的显示「做完几步 / 共几步」;有好几个阶段的显示「做完几个阶段 / 共几个阶段」,眼下这个阶段自己还分步时,分数左边多一个小环,按这个阶段的步数切段、做完一步亮一段。上面三条依次是「1/7」「9/18」、带小环的「1/3」这三种。回执里那句话仍把后一种写成带小数点的「1.2/3」(做完 1 个阶段、眼下这个阶段做完 2 步、共 3 个阶段)。",
-    "- **收尾不用专门报**:回合结束时,进度带会自己把最上面那一条没做完的行切成「等你拍板」(还有子代理在跑时不切),用户回话后自己回到工作中。停下来问用户、整件做完都不用专门报,也不用传 `status`。",
+    "- **收尾不用专门报**:回合结束时,进度带会自己把最上面那一条没做完的行切成「等你拍板」(后台命令、子代理、Monitor、定时唤醒和定时任务在等着时不切),用户回话后自己回到工作中。停下来问用户、整件做完都不用专门报,也不用传 `status`。",
     // 这段说明子代理的对话里也会带上,工具它也取得到(真机上派探针看过),所以得有一句是直接说给它听的。
     "- **你自己就是被派出去的子代理时不要报**:带上已经有你的一行了。派子代理的一方也不用替它报;那一行的标题是派它时写的 description,所以 description 要写得让人看得懂是哪件活。",
     "- **撤行**:计划改了、这件活不做了,传 `remove: true` 撤掉。",
@@ -391,6 +402,18 @@ export const register: Register = (on) => {
     return result;
   });
 
+  on("classic.Stop", async ($, e, next) => {
+    // 只看主循环的 Stop(子代理的有 agent_id)。悄悄死掉的子代理不会在 background_tasks 里,所以忙不忙不看卡片上子代理那一行。
+    // 这是能拦住停下的事件:自己这点记录绝不能抛,一律原样放行。
+    try {
+      if (!e.agent_id)
+        busy = (e.background_tasks?.length ?? 0) > 0 || (e.session_crons?.length ?? 0) > 0;
+    } catch {
+      // 看不懂就当不忙。
+    }
+    return next(e);
+  });
+
   on("turn.start", async ($, e, next) => {
     const result = await next(e);
     // 后台子代理开跑时也会触发一次 turn.start:那不是主循环的新一轮,回合结束切的拍板不撤。
@@ -503,22 +526,23 @@ export const register: Register = (on) => {
       const landed = last?.now;
       const cached = last?.cached ?? ((shown: Card) => shown);
       landing = undefined;
+      // 取这一轮 Stop 记下的忙并清掉;被打断的回合没有 Stop,就是不忙 —— 用户刚亲手停了它,球该交回去。
+      const isBusy = busy;
+      busy = false;
       // 没读到数也要把「在跑」撤掉(被打断的那一轮常常这样),不然卡片一直是干活的样子。
       const taken = await measure($);
       const measured = landed ? { ...taken, now: landed } : taken;
       await draw($, measured, (before) => {
-        const shown = cached(before);
+        // handed 每次按这一轮重算,不沿用旧的:旧的在这一轮忙的时候也该撤。
+        const { handed: _old, ...shown } = cached(before);
         const { now, at } = measured;
         const agents = withoutEndedAgents(shown.agents ?? []);
         const rows = settled(shown.rows ?? []);
         const tasks = settledTasks(shown.tasks);
-        // 这一轮答完了:该用户说话了。没有子代理还在替它干活、并且显示出来会有一条被切成「等你拍板」的话,记一笔 handed;
+        // 这一轮答完了:该用户说话了。这一轮的 Stop 没报后台活和定时在等着、并且显示出来会有一条被切成「等你拍板」的话,记一笔 handed;
         // 行和任务列表本身不改,画的时候再推(见 handedOver)。什么都不用切就不写。
         const over = handedOver(rows, tasks);
-        const isHanded =
-          !shown.handed &&
-          !agents.some((agent) => !agent.ended) &&
-          (over.rows !== rows || over.tasks !== tasks);
+        const isHanded = !isBusy && (over.rows !== rows || over.tasks !== tasks);
         // 没有读数:一种是没读到,一种是卡片上本来就没有、宿主也还说不出窗口用了多少。都只收尾,不记柱子。
         if (!now)
           return {

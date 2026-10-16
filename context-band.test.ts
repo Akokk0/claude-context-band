@@ -148,6 +148,8 @@ async function sessionAfter(
   let used = tokens[0];
   let rateLimits = limits;
   on("session.start", async (_, e) => ({ cwd: e.cwd }));
+  // 底层得有实现,不然发 classic.Stop 会抛 no implementation;必须在测试第一次用 $ 之前挂。
+  on("classic.Stop", async () => ({}));
   host.disk.clear();
   host.session = "s-1";
   host.born = 0;
@@ -3403,7 +3405,12 @@ test("the usage note no longer asks for a report before the answer or a decide s
     expect(note).not.toContain(old);
     expect(JSON.stringify(host.tools)).not.toContain(old);
   }
-  for (const piece of ["收尾不用专门报", "回合结束时", "等你拍板", "还有子代理在跑时不切"])
+  for (const piece of [
+    "收尾不用专门报",
+    "回合结束时",
+    "等你拍板",
+    "后台命令、子代理、Monitor、定时唤醒和定时任务在等着时不切",
+  ])
     expect(note).toContain(piece);
   for (const piece of ["收尾不用专门报", "回合结束时", "等用户拍板"])
     expect(JSON.stringify(host.tools)).toContain(piece);
@@ -4147,6 +4154,11 @@ test("a subagent still running at the end of the main turn: nothing turns to wai
   await report($, { done: 3 });
   await updatePlan($, { items: TASKS });
   await spawn($);
+  // 真机时序:主循环的 Stop 先到,里面带着还在跑的后台子代理;turn.complete 晚一点到。
+  await $.classic.Stop({
+    stop_hook_active: false,
+    background_tasks: [{ type: "subagent", id: "agent-1", status: "running" }],
+  } as never);
   await $.turn.complete(TURN);
 
   expect(await wordsOn($)).toEqual(["子代理在跑", "工作中", "工作中"]);
@@ -4274,4 +4286,122 @@ test("the waiting the end of the turn set survives a restart, and the next turn 
   await begin($);
   expect(await rowsOn($)).toEqual(["活 总:工作中,施工 1.1/3,33%"]);
   expect(host.disk.get("rows:s-1")).not.toHaveProperty("handed");
+});
+
+// ---- 「忙不忙」看主循环 Stop 里报的后台活和定时,不看卡片上子代理那一行 ----
+
+/** 主循环的一次 Stop(不带 agent_id):里面报着这一刻还有什么后台活、什么定时在等。 */
+const stop = ($: Engine, extra: Record<string, unknown> = {}) =>
+  $.classic.Stop({
+    stop_hook_active: false,
+    background_tasks: [],
+    session_crons: [],
+    ...extra,
+  } as never);
+
+const SHELL = { type: "shell", status: "running" };
+
+test("a background shell still running in the Stop: the end of the turn hands nothing over", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a one-off scheduled wakeup in the Stop: nothing is handed over", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, {
+    session_crons: [{ id: "c1", schedule: "22 10 * * *", recurring: false, prompt: "p" }],
+  });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a recurring cron in the Stop: nothing is handed over, so the band does not flip between loops", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, {
+    session_crons: [{ id: "c1", schedule: "*/5 * * * *", recurring: true, prompt: "p" }],
+  });
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a subagent row left hanging as running, but the Stop says nothing is running: the turn is handed over", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await spawn($);
+  await begin($);
+  await stop($);
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["子代理在跑", "等你拍板"]);
+});
+
+test("a turn the user stopped sends no Stop: it is handed over even with a subagent row left running", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await spawn($);
+  await begin($);
+  await $.turn.complete({ ...TURN, isAborted: true, reason: "aborted" } as never);
+
+  expect(await wordsOn($)).toEqual(["子代理在跑", "等你拍板"]);
+});
+
+test("a Stop with an agent_id is not the main loop's: its background work does not count", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { agent_id: "agent-9", background_tasks: [SHELL] });
+  await stop($);
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("what one turn's Stop saw does not leak into the next turn", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+  expect(await wordsOn($)).toEqual(["工作中"]);
+
+  // 下一轮被打断,没有 Stop:上一轮记下的忙不能留下来。
+  await begin($);
+  await $.turn.complete({ ...TURN, isAborted: true, reason: "aborted" } as never);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("turn.complete recomputes the handover for this turn instead of keeping the old one: a busy end withdraws it", async ($, on) => {
+  // 钉「回合结束时 handed 直接重算、不沿用旧值」:没经过 turn.start 撤,上一次切的拍板也要在这一次忙的时候撤掉。
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($);
+  await $.turn.complete(TURN);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.complete(TURN);
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
+
+test("a subagent's turn.start between the main Stop and turn.complete does not wipe what the Stop saw", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await stop($, { background_tasks: [SHELL] });
+  await $.turn.start({ text: "go", turnId: "t2", agentId: "agent-9" } as never);
+  await $.turn.complete(TURN);
+
+  expect(await wordsOn($)).toEqual(["工作中"]);
 });
