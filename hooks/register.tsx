@@ -40,6 +40,7 @@ import {
   keptTasks,
   keptOf,
   handedFrom,
+  isUserReply,
   lastReportOf,
   receiptOf,
   rowAlt,
@@ -330,7 +331,12 @@ export const register: Register = (on) => {
   });
 
   on("prompt.submit", async ($, e, next) => {
-    // 主人发话了:等拍板的行不用再等。只认主人发的这一下 —— 后台的活回来也会开一轮,那不算回话。
+    // 主人发话了:等拍板的行不用再等。只认用户回话(见 isUserReply,真机量过的来源):
+    // 输入框里打的字(空闲时打的、干活时打的送进这一轮的、点收尾框按钮的)都是 composer;
+    // 后台命令/Monitor 完成是 task-notification,后台子代理交回是 peer,定时唤醒是 scheduled-trigger,
+    // 桌面端自己塞进来的(start_session 开场任务、别的会话 send_message)是 sdk —— 这些都不算回话,什么都不改、原样放行。
+    // 后台的活回来开的那一轮,回合结束自动切的拍板由 turn.start 撤;wrap_up 的问题和模型传的 decide 要等用户真回话。
+    if (!isUserReply(e.origin)) return next(e);
     await change($, (shown) => {
       const rows = withoutDecide(shown.rows ?? []);
       const { asking, ...tasks } = shown.tasks ?? { asking: undefined };
@@ -433,7 +439,7 @@ export const register: Register = (on) => {
         ...(isMain ? rest : shown),
         ...quotas(shown, measured),
         rows: settled(at ? withoutStale(open, at) : open),
-        // 清单全做完了(收尾时打的勾),看过一轮了,新的一轮开始就收起;还在等用户回答的不收(后台的活回来开的轮不是用户回话)。
+        // 清单全做完了(收尾时打的勾),看过一轮了,新的一轮开始就收起;还在等用户回答的不收(后台的活回来开的轮不是用户回话,见 prompt.submit)。
         tasks:
           shown.tasks &&
           !shown.tasks.asking &&

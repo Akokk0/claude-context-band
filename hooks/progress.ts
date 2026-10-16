@@ -9,6 +9,7 @@
 // 画法照设计稿(Claude Design 画布上的进度行),和仪表同一套语汇:
 // 不画自己的底,亮色写成属性、暗色在 <style> 里覆盖,动画只在「这次画的和上一次不一样」时带上,样式全写在 <style> 里。
 
+import type { PromptOrigin } from "claude-code";
 import type { Agent, Phase, Row, RowStatus, Task } from "../types";
 import { WIDTH, svgOf } from "./frame";
 
@@ -315,6 +316,27 @@ export function isForgotten(rows: readonly Row[], now: number, tasks?: { at: num
  */
 export function shownRows(rows: readonly Row[]): Row[] {
   return [...rows].reverse();
+}
+
+/**
+ * 一次 prompt.submit 是不是用户在回话。没带 origin(老引擎、旧测试)照原来算用户;
+ * 带了的只认 composer、bridge、slack-ping、auto-continuation,和以用户身份发的 plugin(asUser)。
+ * 类型取自引擎的 PromptOrigin;以后新出现的 kind 落到 default,一律不算。
+ * sdk 不算:桌面端里用户自己打字是 composer,sdk 是桌面端自己塞进来的(start_session 的开场任务、别的会话 send_message)。
+ */
+export function isUserReply(origin: PromptOrigin | undefined): boolean {
+  if (!origin) return true;
+  switch (origin.kind) {
+    case "composer":
+    case "bridge":
+    case "slack-ping":
+    case "auto-continuation":
+      return true;
+    case "plugin":
+      return origin.asUser === true;
+    default:
+      return false;
+  }
 }
 
 /** 等拍板的行回到由步数推出来的状态(主人发话了)。什么都不用改时原样交回。 */

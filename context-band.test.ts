@@ -4405,3 +4405,67 @@ test("a subagent's turn.start between the main Stop and turn.complete does not w
 
   expect(await wordsOn($)).toEqual(["工作中"]);
 });
+
+// ---- prompt.submit 只在用户真回话时撤拍板 ----
+
+const submitFrom = ($: Engine, origin: Record<string, unknown> | undefined, turnId = "t") =>
+  $.prompt.submit({ text: "x", ...(origin ? { origin } : {}), turnId } as never);
+
+for (const origin of [
+  { kind: "task-notification" },
+  { kind: "sdk" },
+  { kind: "peer" },
+  { kind: "scheduled-trigger" },
+  { kind: "plugin", name: "other" },
+  { kind: "plugin", name: "other", asUser: false },
+]) {
+  test(`a question the wrap-up carried stays when a ${origin.kind} submission arrives${"asUser" in origin ? " without asUser" : ""}`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await updatePlan($, { items: TASKS });
+    await wrapUp($, ASK, IN_THE_BOX);
+    await submitFrom($, origin);
+
+    expect(await wordsOn($)).toEqual(["等你拍板"]);
+  });
+
+  test(`a row the model marked waiting stays when a ${origin.kind} submission arrives${"asUser" in origin ? " without asUser" : ""}`, async ($, on) => {
+    await sessionAfter($, on, [36_400]);
+    await report($, { done: 3, status: "decide" });
+    await submitFrom($, origin);
+
+    expect(await wordsOn($)).toEqual(["等你拍板"]);
+  });
+}
+
+for (const origin of [
+  { kind: "composer" },
+  { kind: "bridge" },
+  { kind: "slack-ping" },
+  { kind: "auto-continuation" },
+  { kind: "plugin", name: "other", asUser: true },
+  undefined,
+]) {
+  test(`a submission from ${origin ? JSON.stringify(origin) : "no origin"} is the user answering: waiting is taken back`, async ($, on) => {
+    planHost(on);
+    await sessionAfter($, on, [36_400]);
+    await report($, { done: 3, status: "decide" });
+    await updatePlan($, { items: TASKS });
+    await wrapUp($, ASK, IN_THE_BOX);
+    await submitFrom($, origin);
+
+    expect(await wordsOn($)).toEqual(["工作中", "工作中"]);
+  });
+}
+
+test("the end-of-turn handover is not taken back by a task-notification submission, but by the turn it opens", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  await submitFrom($, { kind: "task-notification" });
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+
+  await begin($);
+  expect(await wordsOn($)).toEqual(["工作中"]);
+});
