@@ -39,6 +39,7 @@ import {
   isForgotten,
   keptTasks,
   keptOf,
+  handedFrom,
   lastReportOf,
   receiptOf,
   rowAlt,
@@ -201,7 +202,7 @@ export const register: Register = (on) => {
     });
     // 状态里的行补落一次盘:盘上那份可能落后 —— 落盘这件事上线之前报的行只在状态里,上一次也可能没写成。
     // 盘上的还没接回来(盘读不了)时不落:拿状态里的去落会把盘上的盖掉,接回来时自会合并后落。
-    if (shown.restored) await keep($, shown.rows ?? [], shown.tasks);
+    if (shown.restored) await keep($, shown.rows ?? [], shown.tasks, shown.handed);
     // 「报进度」的工具放在最后注册:它注册不上(宿主不给)也不耽误仪表。同名再注册是覆盖,热加载无妨。
     try {
       await $.tool.register(PROGRESS);
@@ -323,9 +324,10 @@ export const register: Register = (on) => {
       const rows = withoutDecide(shown.rows ?? []);
       const { asking, ...tasks } = shown.tasks ?? { asking: undefined };
       const decided = rows !== (shown.rows ?? rows);
-      if (!decided && !asking) return shown;
+      if (!decided && !asking && !shown.handed) return shown;
+      const { handed: _handed, ...rest } = shown;
       return {
-        ...shown,
+        ...rest,
         ...(decided ? { rows } : {}),
         ...(shown.tasks ? { tasks: tasks as NonNullable<Card["tasks"]> } : {}),
       };
@@ -391,6 +393,8 @@ export const register: Register = (on) => {
 
   on("turn.start", async ($, e, next) => {
     const result = await next(e);
+    // 后台子代理开跑时也会触发一次 turn.start:那不是主循环的新一轮,回合结束切的拍板不撤。
+    const isMain = !(e as { agentId?: string }).agentId;
     // 起点是卡片上已有的读数,不现读:宿主报的用量只算到上一次请求发出去时,不含那次回应,
     // 拿它当起点会把上一轮的回应算进这一轮(真机上撞过)。两轮之间压缩过的话,session.compact 那边已经把读数落下去了。
     // 「上一次画的」也拨到此刻,上一轮带进来的入场动画就不会跟着这次重画再播一遍。
@@ -400,8 +404,10 @@ export const register: Register = (on) => {
       // 做完的行看过一轮了,新的一轮开始就收起;整条带太久没人报的话也全收起(多半是不做了)。
       // 留下的行「上一次画的」拨到此刻,不跟着这次重画再滑一遍。
       const open = (shown.rows ?? []).filter((row) => statusOf(row) !== "done");
+      // 下一轮主循环开始:回合结束自动切的拍板撤掉(wrap_up 的问题、模型传的 decide 不归它管,留着)。
+      const { handed: _handed, ...rest } = shown;
       return {
-        ...shown,
+        ...(isMain ? rest : shown),
         ...quotas(shown, measured),
         rows: settled(at ? withoutStale(open, at) : open),
         // 清单全做完了(收尾时打的勾),看过一轮了,新的一轮开始就收起;还在等用户回答的不收(后台的活回来开的轮不是用户回话)。
@@ -504,15 +510,26 @@ export const register: Register = (on) => {
         const shown = cached(before);
         const { now, at } = measured;
         const agents = withoutEndedAgents(shown.agents ?? []);
-        // 这一轮答完了:该用户说话了。没有子代理还在替它干活的话,把最上面没做完的那一条切成「等你拍板」。
-        const { rows, tasks } = handedOver(
-          settled(shown.rows ?? []),
-          settledTasks(shown.tasks),
-          agents.some((agent) => !agent.ended),
-        );
+        const rows = settled(shown.rows ?? []);
+        const tasks = settledTasks(shown.tasks);
+        // 这一轮答完了:该用户说话了。没有子代理还在替它干活、并且显示出来会有一条被切成「等你拍板」的话,记一笔 handed;
+        // 行和任务列表本身不改,画的时候再推(见 handedOver)。什么都不用切就不写。
+        const over = handedOver(rows, tasks);
+        const isHanded =
+          !shown.handed &&
+          !agents.some((agent) => !agent.ended) &&
+          (over.rows !== rows || over.tasks !== tasks);
         // 没有读数:一种是没读到,一种是卡片上本来就没有、宿主也还说不出窗口用了多少。都只收尾,不记柱子。
         if (!now)
-          return { ...shown, ...quotas(shown, measured), rows, tasks, agents, running: false };
+          return {
+            ...shown,
+            ...quotas(shown, measured),
+            rows,
+            tasks,
+            agents,
+            running: false,
+            ...(isHanded ? { handed: true as const } : {}),
+          };
         const spent = now.tokens - (shown.gauge?.base ?? now.tokens);
         return {
           ...shown,
@@ -521,6 +538,7 @@ export const register: Register = (on) => {
           tasks,
           agents,
           running: false,
+          ...(isHanded ? { handed: true as const } : {}),
           turns: withTurn(shown.turns, { spent, percent: now.percent }),
           gauge: {
             now,
@@ -542,13 +560,18 @@ export const register: Register = (on) => {
       limits: quota,
       limitsAt,
       running,
-      rows: all,
+      rows: sentRows,
       agents: sent,
-      tasks: sentTasks,
+      tasks: savedTasks,
+      handed,
       cache,
     } = await read($, card);
+    // 回合结束交回用户:行和任务列表在状态里原样,画的时候才把最上面没做完的那条显示成等拍板。
+    const { rows: all, tasks: sentTasks } = handed
+      ? handedOver(sentRows ?? [], savedTasks)
+      : { rows: sentRows ?? [], tasks: savedTasks };
     const tasks = taskRow(sentTasks);
-    const rows = [...(tasks ? [tasks] : []), ...shownRows(all ?? [])];
+    const rows = [...(tasks ? [tasks] : []), ...shownRows(all)];
     const agents = shownAgents(sent ?? []);
     if (e.props.hasSurvey || (!shown && rows.length === 0 && agents.length === 0)) {
       return next(e);
@@ -660,16 +683,11 @@ function settled(rows: readonly Row[]): Row[] {
 }
 
 /**
- * 回合结束,球到用户这边:带里最上面(最细)那条没做完的行切成「等你拍板」,更大的行不动。
+ * 回合结束,球到用户这边(Card.handed)时带里显示成什么样:最上面(最细)那条没做完的行显示成「等你拍板」,更大的行不动。
  * 任务列表排在最上面,它没做完就切它;否则从最后报的往前找第一条没做完的 progress 行。
- * 还有子代理在跑就什么都不切。什么都不用切、或者已经是了,原样交回。
+ * 只管显示成什么样:忙不忙由设 handed 的一方决定。什么都不用切、或者已经是了,原样交回。
  */
-function handedOver(
-  rows: Row[],
-  tasks: Card["tasks"],
-  isBusy: boolean,
-): { rows: Row[]; tasks: Card["tasks"] } {
-  if (isBusy) return { rows, tasks };
+function handedOver(rows: Row[], tasks: Card["tasks"]): { rows: Row[]; tasks: Card["tasks"] } {
   const row = taskRow(tasks);
   if (tasks && row && statusOf(row) !== "done")
     return { rows, tasks: tasks.asking ? tasks : { ...tasks, asking: true } };
@@ -721,8 +739,8 @@ const ROWS = "rows:";
 const keyOf = (session: string) => `${ROWS}${session}`;
 
 /** 行和任务列表里要落盘的那些,写成一串字:比「变了没有」用。 */
-const kept = (shown: Pick<Card, "rows" | "tasks">) =>
-  JSON.stringify([keptOf(shown.rows ?? []), keptTasks(shown.tasks)]);
+const kept = (shown: Pick<Card, "rows" | "tasks" | "handed">) =>
+  JSON.stringify([keptOf(shown.rows ?? []), keptTasks(shown.tasks), shown.handed === true]);
 
 /**
  * 卡片的每一次写都从这儿过。
@@ -737,7 +755,7 @@ async function change($: EngineInterface, next: (shown: Card) => Card): Promise<
     moved = kept(drawn) !== kept(shown);
     return drawn;
   });
-  if (moved && written.restored) await keep($, written.rows ?? [], written.tasks);
+  if (moved && written.restored) await keep($, written.rows ?? [], written.tasks, written.handed);
   return written;
 }
 
@@ -760,12 +778,14 @@ async function restore($: EngineInterface): Promise<void> {
     const ownSaved = await $.store.get(mine);
     let rows = rowsFrom(ownSaved);
     let tasks = tasksFrom(ownSaved);
+    let handed = handedFrom(ownSaved);
     if (rows.length === 0 && !tasks) {
       others = await othersOf($, mine);
       past = inherited(others, await born($));
       if (past) {
         rows = rowsFrom(others.get(past));
         tasks = tasksFrom(others.get(past));
+        handed = handedFrom(others.get(past));
       }
     }
     // 在此刻的状态上合,不拿先读出来的那份写回去:读和写之间别处可能已经写过了。
@@ -778,6 +798,9 @@ async function restore($: EngineInterface): Promise<void> {
         ...shown,
         rows: withSaved(rows, shown.rows ?? []),
         ...(shown.tasks || !tasks ? {} : { tasks }),
+        // 进程刚起来,状态里还没有;有盘上的就用盘上的。
+        // 回合正在跑就不接:盘上的 handed 不可能是这一轮的(下一轮 turn.start 本来就会撤),接了模型干活时会显示等你拍板。
+        ...(shown.handed || !handed || shown.running ? {} : { handed }),
         restored: true,
       };
     });
@@ -789,7 +812,7 @@ async function restore($: EngineInterface): Promise<void> {
   try {
     if (past || added) {
       // 落的是状态里此刻的行,不是刚读出来的那份:同时到的另一件活可能已经先接回来、还添了行。
-      const saved = await keep($, written.rows ?? [], written.tasks);
+      const saved = await keep($, written.rows ?? [], written.tasks, written.handed);
       // 搬到自己的 id 底下,旧的那份删掉:留着的话,这边把行撤光之后再被换一次 id,撤掉的行又会从它那儿回来。
       // 但新的那份没写成就不能删:两份都没了就再也接不回来。
       if (past && saved) await $.store.delete(past);
@@ -900,6 +923,7 @@ function keep(
   $: EngineInterface,
   rows: readonly Row[],
   tasks?: Parameters<typeof keptTasks>[0],
+  handed?: true,
 ): Promise<boolean> {
   const saved = saving.then(async () => {
     try {
@@ -910,6 +934,7 @@ function keep(
           born: await born($),
           rows: keptOf(rows),
           tasks: keptTasks(tasks),
+          ...(handed ? { handed: true } : {}),
         });
       return true;
     } catch {

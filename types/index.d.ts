@@ -95,6 +95,11 @@ export type Card = {
   rows?: Row[];
   /** 桌面端的任务列表(按清单原来的顺序)、它最近一次变动的时刻、变动之前做完了几项(进度条从那儿滑过来,回合结束时拨到现在)、模型是不是在等用户拍板(asking);画成固定排在进度行最上面的一行。还没有清单就没有。 */
   tasks?: { items: Task[]; at: number; was: number; asking?: boolean };
+  /**
+   * 回合结束、球交回用户时由 mod 设:画的时候把最上面那条没做完的行显示成等拍板(见 handedOver),行和任务列表本身不改。
+   * 下一轮主循环开始或用户回话时撤。wrap_up 带问题(tasks.asking)、模型传 decide(row.status)是另外两种拍板,不归它管。
+   */
+  handed?: true;
   /** 派出去的子代理,一个一行,排在进度行上面。 */
   agents?: Agent[];
 };

@@ -3617,6 +3617,8 @@ test("a fresh list does not slide the bar back from where the old one had got to
   await begin($);
   await $.turn.complete(TURN);
 
+  // 新清单是下一轮里换的:那一轮开始时回合结束切的拍板已经撤了。
+  await begin($);
   await updatePlan($, {
     items: ["甲", "乙", "丙", "丁"].map((content, i) => ({ content, status: status(i, 0) })),
   });
@@ -4176,4 +4178,100 @@ test("a row the model already marked waiting is not written again when the turn 
 
   expect(await wordsOn($)).toEqual(["等你拍板"]);
   expect(host.writes).toBe(writes);
+});
+
+// ---- 回合结束自动切的拍板单独记成 handed:下一轮主循环开始就撤,别的来源的拍板不归它管 ----
+
+/**
+ * 提前打字:终端里干活时打的字,按引擎类型注释是回车那一刻就触发 prompt.submit(带当时那一轮的 turnId),
+ * 排到这一轮结束后另开一轮时不再触发,只有 turn.start。桌面端实测不走这条路(送进当前这一轮)。
+ */
+const typedAhead = ($: Engine) =>
+  $.prompt.submit({ text: "提前打的字", origin: { kind: "composer" }, turnId: "t" } as never);
+
+test("the waiting the end of the turn set is taken back when the next main turn starts, with no prompt.submit in between", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await typedAhead($);
+  await $.turn.complete(TURN);
+  expect(await rowsOn($)).toEqual(["切片 ⑳ · 图库合并:等你拍板,施工 1.1/3,33%"]);
+
+  await begin($);
+  expect(await rowsOn($)).toEqual(["切片 ⑳ · 图库合并:工作中,施工 1.1/3,33%"]);
+});
+
+test("a task list the end of the turn turned to waiting is taken back when the next main turn starts", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+
+  await begin($);
+  expect(await rowsOn($)).toEqual(["任务列表:工作中,列出 hooks/ 0/2,0%"]);
+});
+
+test("a question the wrap-up carried is still waiting when the next turn starts: a turn a background job opened is not the user answering", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await updatePlan($, { items: TASKS });
+  await wrapUp($, ASK, IN_THE_BOX);
+  await $.turn.complete(TURN);
+  await begin($);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("a row the model itself marked waiting is still waiting when the next turn starts", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3, status: "decide" });
+  await begin($);
+  await $.turn.complete(TURN);
+  await begin($);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("a turn a subagent starts does not take the waiting back", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  await $.turn.start({ text: "go", turnId: "t2", agentId: "agent-9" } as never);
+
+  expect(await wordsOn($)).toEqual(["等你拍板"]);
+});
+
+test("a handover read back from the disk in the middle of a running turn is not taken: the turn is still going", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(host.disk.get("rows:s-1")).toMatchObject({ handed: true });
+
+  // 重启后会话开始和 turn.start 时盘都读不了,这一轮中途一次 report 才读成功。
+  host.isDiskUnreadable = true;
+  await restart($);
+  await begin($);
+  host.isDiskUnreadable = false;
+  await report($, { plan: "片", title: "活 片", done: 1 });
+
+  expect(await wordsOn($)).toEqual(["勘察阶段", "工作中"]);
+});
+
+test("the waiting the end of the turn set survives a restart, and the next turn start takes it back", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "活 总", done: 3 });
+  await begin($);
+  await $.turn.complete(TURN);
+  expect(host.disk.get("rows:s-1")).toMatchObject({ handed: true });
+
+  await restart($);
+  expect(await rowsOn($)).toEqual(["活 总:等你拍板,施工 1.1/3,33%"]);
+
+  await begin($);
+  expect(await rowsOn($)).toEqual(["活 总:工作中,施工 1.1/3,33%"]);
+  expect(host.disk.get("rows:s-1")).not.toHaveProperty("handed");
 });

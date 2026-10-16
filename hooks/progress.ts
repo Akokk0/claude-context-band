@@ -420,6 +420,10 @@ export function taskRow(
 export const keptTasks = (tasks: { items: Task[]; at: number; asking?: boolean } | undefined) =>
   tasks && { items: tasks.items, at: tasks.at, ...(tasks.asking ? { asking: true } : {}) };
 
+/** 盘上读回来的东西里,回合结束自动切的拍板(Card.handed)还在不在;旧格式没有这个字段就是没有。 */
+export const handedFrom = (saved: unknown): true | undefined =>
+  (saved as { handed?: unknown } | null)?.handed === true ? true : undefined;
+
 /**
  * 盘上读回来的东西里的任务列表。和行一样每样都验:读不成就是没有(不抛错)。
  * 恢复时「上一次画的完成数」就是现在的完成数 —— 条直接落在做到的地方,不从头滑。
