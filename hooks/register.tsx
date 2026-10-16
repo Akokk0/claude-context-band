@@ -55,6 +55,7 @@ import {
   withAgentStep,
   withoutEndedAgents,
   withReport,
+  withSaved,
   withSpawn,
   withoutDecide,
   withoutGoneAgents,
@@ -199,8 +200,8 @@ export const register: Register = (on) => {
       };
     });
     // 状态里的行补落一次盘:盘上那份可能落后 —— 落盘这件事上线之前报的行只在状态里,上一次也可能没写成。
-    // 行还没接回来(盘读不了)时不落:拿空的会把盘上的删掉。
-    if (shown.rows) await keep($, shown.rows, shown.tasks);
+    // 盘上的还没接回来(盘读不了)时不落:拿状态里的去落会把盘上的盖掉,接回来时自会合并后落。
+    if (shown.restored) await keep($, shown.rows ?? [], shown.tasks);
     // 「报进度」的工具放在最后注册:它注册不上(宿主不给)也不耽误仪表。同名再注册是覆盖,热加载无妨。
     try {
       await $.tool.register(PROGRESS);
@@ -725,8 +726,8 @@ const kept = (shown: Pick<Card, "rows" | "tasks">) =>
 
 /**
  * 卡片的每一次写都从这儿过。
- * 写之前:状态里还没有行(进程刚起来),先把盘上的接回来 —— 接回来之前谁都不写,不然拿空的把盘上的盖掉。
- * 写之后:行变了就落盘。每次变都落,不等会话结束:应用被关掉时会话结束那一下不一定走得到。
+ * 写之前:盘上的还没接回来(进程刚起来),先接 —— 接回来之前状态照改、但不落盘,不然会把盘上的盖掉。
+ * 写之后:行变了、并且盘上的接回来了,就落盘。每次变都落,不等会话结束:应用被关掉时会话结束那一下不一定走得到。
  */
 async function change($: EngineInterface, next: (shown: Card) => Card): Promise<Card> {
   await restore($);
@@ -736,45 +737,96 @@ async function change($: EngineInterface, next: (shown: Card) => Card): Promise<
     moved = kept(drawn) !== kept(shown);
     return drawn;
   });
-  if (moved) await keep($, written.rows ?? [], written.tasks);
+  if (moved && written.restored) await keep($, written.rows ?? [], written.tasks);
   return written;
 }
 
 /**
- * 进程刚起来(应用重启后续上会话):状态里还没有行,把盘上这个会话的行接回来。
- * 只看状态里有没有行,不在模块里记「接过了」:热加载会清模块变量,而那时状态里的行还在,不该再读盘。
- * 自己的 id 底下什么都没有时,找这场对话从前留下的那份(见 inherited)。
- * 接回来之后顺手把别的会话留在盘上、没人管了的行清掉:进程起来时清一回就够。
+ * 进程刚起来(应用重启后续上会话):把盘上这个会话的行和任务列表接回来。
+ * 接没接回来记在状态里(restored),不看有没有行、也不在模块里记「接过了」:
+ * 读盘失败那阵子别处会把行写成空的,而热加载会清模块变量、状态里的 restored 还在。
+ * 接回来只靠自己那份:读到了就接,别的会话的键读不读得了都不相干。
+ * 自己的 id 底下什么都没有时,才得把别的键都读上,找这场对话从前留下的那份(见 inherited);这一步读盘失败什么都不改。
+ * 接成了把盘上的和状态里已有的合起来(见 withSaved)。读盘失败、restored 不置,下一次写之前再试。
  */
 async function restore($: EngineInterface): Promise<void> {
-  if ((await read($, card)).rows !== undefined) return;
+  if ((await read($, card)).restored) return;
+  let others: Map<string, unknown> | undefined;
+  let past: string | undefined;
+  let added = false;
+  let written: Card;
   try {
     const mine = keyOf(await $.session.id());
     const ownSaved = await $.store.get(mine);
-    const own = rowsFrom(ownSaved);
-    const ownTasks = tasksFrom(ownSaved);
-    const others = new Map<string, unknown>();
-    for (const key of await $.store.keys())
-      if (key !== mine && key.startsWith(ROWS)) others.set(key, await $.store.get(key));
-    const past = own.length === 0 && !ownTasks ? inherited(others, await born($)) : undefined;
-    const rows = past ? rowsFrom(others.get(past)) : own;
-    const tasks = past ? tasksFrom(others.get(past)) : ownTasks;
-    const written = await update($, card, (shown) =>
-      shown.rows === undefined
-        ? { ...shown, rows, ...(shown.tasks || !tasks ? {} : { tasks }) }
-        : shown,
-    );
-    if (past) {
-      // 搬到自己的 id 底下,旧的那份删掉:留着的话,这边把行撤光之后再被换一次 id,撤掉的行又会从它那儿回来。
-      // 落的是状态里此刻的行,不是刚读出来的那份:同时到的另一件活可能已经先接回来、还添了行。
-      await keep($, written.rows ?? rows, written.tasks);
-      await $.store.delete(past);
+    let rows = rowsFrom(ownSaved);
+    let tasks = tasksFrom(ownSaved);
+    if (rows.length === 0 && !tasks) {
+      others = await othersOf($, mine);
+      past = inherited(others, await born($));
+      if (past) {
+        rows = rowsFrom(others.get(past));
+        tasks = tasksFrom(others.get(past));
+      }
     }
-    const now = await $.clock.now();
-    for (const [key, saved] of others)
-      if (isForgotten(rowsFrom(saved), now, tasksFrom(saved))) await $.store.delete(key);
+    // 在此刻的状态上合,不拿先读出来的那份写回去:读和写之间别处可能已经写过了。
+    written = await update($, card, (shown) => {
+      // 同时到的另一次已经抢先接上了:这次手里的是它接上之前读的旧内容,再合一遍会把那之后撤掉的行带回来。
+      if (shown.restored) return shown;
+      // 接回来之前状态里就有行或任务列表(读盘失败那阵子添的):合并后得落一次盘。
+      added = (shown.rows?.length ?? 0) > 0 || !!shown.tasks;
+      return {
+        ...shown,
+        rows: withSaved(rows, shown.rows ?? []),
+        ...(shown.tasks || !tasks ? {} : { tasks }),
+        restored: true,
+      };
+    });
   } catch {
-    // 盘读不了:行先空着,下一次写之前再试;清到一半断了的,下回进程起来接着清。
+    // 自己那份(或找旧 id 要读的别的键)读不了,或状态没写成:什么都没改、restored 不置,下一次写之前再试。
+    return;
+  }
+  // 接回来了。下面是善后,失败了也不影响已经接上的行:清理的下回进程起来接着清,搬家没删成的旧键也留到那时。
+  try {
+    if (past || added) {
+      // 落的是状态里此刻的行,不是刚读出来的那份:同时到的另一件活可能已经先接回来、还添了行。
+      const saved = await keep($, written.rows ?? [], written.tasks);
+      // 搬到自己的 id 底下,旧的那份删掉:留着的话,这边把行撤光之后再被换一次 id,撤掉的行又会从它那儿回来。
+      // 但新的那份没写成就不能删:两份都没了就再也接不回来。
+      if (past && saved) await $.store.delete(past);
+    }
+    await sweep($, keyOf(await $.session.id()), others, past);
+  } catch {
+    // 盘上出了岔子:行已经在状态里,善后留到下回。
+  }
+}
+
+/** 盘上别的会话的键和它们的内容;读不上就整个抛出去(找旧 id 要的是全的)。 */
+async function othersOf($: EngineInterface, mine: string): Promise<Map<string, unknown>> {
+  const others = new Map<string, unknown>();
+  for (const key of await $.store.keys())
+    if (key !== mine && key.startsWith(ROWS)) others.set(key, await $.store.get(key));
+  return others;
+}
+
+/**
+ * 把别的会话留在盘上、没人管了的行清掉:进程起来时清一回就够。
+ * 找旧 id 时读过的内容(known)直接用;没读过的一个一个读,哪个读不了就跳过它,不拦着别的。
+ */
+async function sweep(
+  $: EngineInterface,
+  mine: string,
+  known: ReadonlyMap<string, unknown> | undefined,
+  moved: string | undefined,
+): Promise<void> {
+  const now = await $.clock.now();
+  for (const key of await $.store.keys()) {
+    if (key === mine || key === moved || !key.startsWith(ROWS)) continue;
+    try {
+      const saved = known?.has(key) ? known.get(key) : await $.store.get(key);
+      if (isForgotten(rowsFrom(saved), now, tasksFrom(saved))) await $.store.delete(key);
+    } catch {
+      // 这一个读不了或删不掉:留着,下回进程起来再清。
+    }
   }
 }
 
@@ -842,13 +894,14 @@ let saving: Promise<void> = Promise.resolve();
 /**
  * 行和任务列表落盘;一样都不剩就把这个会话那份删掉。
  * 写不了(盘满了、宿主出了岔子)就算了:行还在状态里,只是重启后接不回来,不能让报进度因此坏掉。
+ * 交回写成没成:搬家要看它,别处不看。
  */
 function keep(
   $: EngineInterface,
   rows: readonly Row[],
   tasks?: Parameters<typeof keptTasks>[0],
-): Promise<void> {
-  saving = saving.then(async () => {
+): Promise<boolean> {
+  const saved = saving.then(async () => {
     try {
       const key = keyOf(await $.session.id());
       if (rows.length === 0 && !tasks) await $.store.delete(key);
@@ -858,11 +911,14 @@ function keep(
           rows: keptOf(rows),
           tasks: keptTasks(tasks),
         });
+      return true;
     } catch {
       // 盘上那份停在上一次写成的样子。
+      return false;
     }
   });
-  return saving;
+  saving = saved.then(() => {});
+  return saved;
 }
 
 function chart(history: readonly Turn[]): string {

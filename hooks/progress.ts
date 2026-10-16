@@ -243,6 +243,21 @@ export function withReport(
   return [...rows.filter((row) => kept.includes(row)), next];
 }
 
+/**
+ * 盘上读回来的行和状态里已有的行(盘读不了那阵子报的)合成一份。
+ * 盘上的按原顺序在前;状态里同一件活(plan 相同)的换掉盘上那行、位置不动(状态里的更新);
+ * 状态里新的活按原顺序接在后面。超过 KEPT 行时照 withReport 的规矩,最久没报的让出来。
+ */
+export function withSaved(saved: readonly Row[], shown: readonly Row[]): Row[] {
+  const merged = [
+    ...saved.map((row) => shown.find((now) => now.plan === row.plan) ?? row),
+    ...shown.filter((now) => !saved.some((row) => row.plan === now.plan)),
+  ];
+  if (merged.length <= KEPT) return merged;
+  const kept = [...merged].sort((a, b) => a.at - b.at).slice(merged.length - KEPT);
+  return merged.filter((row) => kept.includes(row));
+}
+
 /** 整条带太久没人报就全收起来;还有哪一行最近报过,就一行都不收。什么都不用收时原样交回。 */
 export function withoutStale(rows: readonly Row[], now: number): Row[] {
   return rows.length === 0 || rows.some((row) => now - row.at <= STALE) ? (rows as Row[]) : [];

@@ -89,7 +89,9 @@ const billOf = (input: number, output: number): Bill => ({
  * 续上时会话 id 多半还是同一个;被打断后再续上的,宿主会给它换一个新的,`born` 不变。
  * `isStateLost`:进程重启过,宿主替会话存着的状态没了。`isDiskDown`:盘读写不了。`isDiskUnreadable`:盘只是读不了,写还行。
  * `writes`:往盘上写(含删)过几回。
- * `onWrite`:每次往盘上写之前叫一声,测试用它让某一次写慢下来。
+ * `onWrite`:每次往盘上写之前叫一声,测试用它让某一次写慢下来(或抛错让这一次写不成)。
+ * `unreadableKeys`:这几个键读不了(别的键照常),其余的盘都好。
+ * `onRead`:每次读到盘上的值之后、交回之前叫一声(带着键),测试用它让某一次读慢下来 —— 拿到的是读到那一刻的旧值。
  */
 const host = {
   disk: new Map<string, unknown>(),
@@ -103,6 +105,8 @@ const host = {
   stateSets: 0,
   isStateDown: false,
   onWrite: (): void | Promise<void> => {},
+  unreadableKeys: new Set<string>(),
+  onRead: (_key: string): void | Promise<void> => {},
   tools: [] as unknown[],
 };
 
@@ -154,9 +158,16 @@ async function sessionAfter(
   host.stateSets = 0;
   host.isStateDown = false;
   host.onWrite = () => {};
+  host.unreadableKeys.clear();
+  host.onRead = () => {};
   host.tools = [];
   on("session.id", async () => ({ value: host.session }));
-  on("store.get", async (_, e) => ({ value: onDisk(() => host.disk.get(e.key), "read") }));
+  on("store.get", async (_, e) => {
+    if (host.unreadableKeys.has(e.key)) throw new Error("key unreadable");
+    const value = onDisk(() => host.disk.get(e.key), "read");
+    await host.onRead(e.key);
+    return { value };
+  });
   on("store.set", async (_, e) => {
     await host.onWrite();
     return {
@@ -2263,7 +2274,7 @@ test("a count just short of a million reads as 1M, not 1000k", async ($, on) => 
 
 /**
  * 应用重启后续上同一个会话:宿主替会话存着的状态没了,盘上的还在,会话 id 没变,会话重新开始。
- * 被测的模块没有重新加载 —— 接回来靠的是状态里有没有行,不是模块里记的什么。
+ * 被测的模块没有重新加载 —— 接回来了没有靠的是状态里的 restored,不是模块里记的什么。
  */
 const restart = async ($: Engine) => {
   host.isStateLost = true;
@@ -2369,6 +2380,183 @@ test("a session that starts while the disk cannot be read leaves what is on the 
   host.isDiskUnreadable = false;
   await restart($);
 
+  expect(await titlesOn($)).toEqual(["总进度"]);
+});
+
+test("changing only the task list after a restart with an unreadable disk does not wipe the rows saved on the disk", async ($, on) => {
+  planHost(on);
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 重启时盘读不了:turn.start 把状态里的行写成了空的,但盘上那份还在。
+  host.isDiskUnreadable = true;
+  await restart($);
+  await begin($);
+  host.isDiskUnreadable = false;
+
+  await updatePlan($, { items: TASKS });
+  expect(await titlesOn($)).toEqual(["任务列表", "总进度"]);
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["任务列表", "总进度"]);
+});
+
+test("rows reported while the disk could not be read are merged with the saved ones once it can, and nothing is written in between", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  const saved = JSON.stringify([...host.disk]);
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+  expect(await titlesOn($)).toEqual(["新的一片"]);
+  expect(JSON.stringify([...host.disk])).toBe(saved);
+
+  host.isDiskUnreadable = false;
+  await report($, { plan: "片", title: "新的一片", done: 2 });
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+});
+
+test("reporting again a piece of work that is on the disk, while the disk could not be read, replaces that row in place once it can", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  for (const plan of ["总", "期", "片"]) {
+    await report($, { plan, title: `活 ${plan}`, done: 1 });
+  }
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await report($, { plan: "期", title: "新期", done: 3 });
+  host.isDiskUnreadable = false;
+  await begin($);
+
+  const rows = [
+    "活 片:勘察阶段,勘察 0.1/3,11%",
+    "新期:工作中,施工 1.1/3,33%",
+    "活 总:勘察阶段,勘察 0.1/3,11%",
+  ];
+  expect(await rowsOn($)).toEqual(rows);
+
+  await restart($);
+  expect(await rowsOn($)).toEqual(rows);
+});
+
+test("rows from the disk and rows reported while it could not be read, together over the limit, give up the one reported longest ago", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  for (let i = 0; i < 10; i++) {
+    clock.now = NOW + i;
+    await report($, { plan: `p${i}`, title: `活 ${i}`, done: 1 });
+  }
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  clock.now = NOW + 100;
+  await report($, { plan: "p10", title: "活 10", done: 1 });
+  host.isDiskUnreadable = false;
+  await begin($);
+
+  const titles = await titlesOn($);
+  expect(titles).toHaveLength(10);
+  expect(titles).not.toContain("活 0");
+  expect(titles[0]).toBe("活 10");
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(titles);
+});
+
+test("a row reported while the disk could not be read is written once the disk can be read, even if the rows do not change after that", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+  host.isDiskUnreadable = false;
+  await begin($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+});
+
+test("a key of another session that cannot be read does not stop this session's own rows from coming back and being saved", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  host.disk.set("rows:s-0", { born: 5, rows: [] });
+  host.unreadableKeys.add("rows:s-0");
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["总进度"]);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+
+  await restart($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+});
+
+test("a hot reload while the disk still cannot be read leaves the disk alone, and the rows merge back once it can", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  const saved = JSON.stringify([...host.disk]);
+
+  host.isDiskUnreadable = true;
+  await restart($);
+  await report($, { plan: "片", title: "新的一片", done: 1 });
+  // 热加载:状态还在,会话再开始一次,盘仍然读不了。
+  await $.session.start(START);
+  expect(JSON.stringify([...host.disk])).toBe(saved);
+
+  host.isDiskUnreadable = false;
+  await report($, { plan: "片", title: "新的一片", done: 2 });
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+  await restart($);
+  expect(await titlesOn($)).toEqual(["新的一片", "总进度"]);
+});
+
+test("a restore that read the disk before another one finished does not bring back a row removed in between", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+  await report($, { plan: "片", title: "这一片", done: 1 });
+
+  // 两件活同时到、都要先接盘:第二次读完盘就卡住,手里是读到那一刻的旧内容。
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let reads = 0;
+  host.onRead = (key) => {
+    if (key === "rows:s-1" && ++reads === 2) return gate;
+  };
+  host.isStateLost = true;
+  const reports = ["期", "段"].map((plan) => report($, { plan, title: `活 ${plan}`, done: 1 }));
+  // 先放行的那件接上了盘,这时撤掉一行并落了盘。
+  await Promise.race(reports);
+  await report($, { plan: "片", title: "这一片", done: 1, remove: true });
+  release();
+  await Promise.all(reports);
+
+  // 状态丢了之后没有重新开始会话,带里没有仪表那一行,所以看盘上的,再重启看带上的。
+  const plansOnDisk = () =>
+    (host.disk.get("rows:s-1") as { rows: { plan: string }[] }).rows.map((row) => row.plan).sort();
+  expect(plansOnDisk()).toEqual(["总", "期", "段"].sort());
+  await restart($);
+  expect((await titlesOn($)).sort()).toEqual(["总进度", "活 期", "活 段"].sort());
+});
+
+test("rows picked up under a new session id keep the old key when saving them under the new one failed", async ($, on) => {
+  await sessionAfter($, on, [36_400]);
+  await report($, { plan: "总", title: "总进度", done: 1 });
+
+  // 换了 id 接管,可头一次写落不下去:两份都弄没的话就再也接不回来了。
+  host.onWrite = () => {
+    throw new Error("write failed");
+  };
+  await resumeAs($, "s-2");
+  expect([...host.disk.keys()]).toEqual(["rows:s-1"]);
+
+  host.onWrite = () => {};
+  await restart($);
   expect(await titlesOn($)).toEqual(["总进度"]);
 });
 
